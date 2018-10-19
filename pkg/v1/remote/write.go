@@ -18,9 +18,12 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -28,8 +31,22 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 )
 
+type WriteOption func(*writer) error
+
+// This option enables streaming writes of blobs. If this is enabled, existence
+// checks will be skipped and duplicate data might be uploaded unnecessarily.
+// However, blob data can be written directly to the registry without
+// buffering, which in some cases might be preferrable.
+func Streaming(w *writer) error {
+	w.streaming = true
+	return nil
+}
+
 // Write pushes the provided img to the specified image reference.
-func Write(ref name.Reference, img v1.Image, auth authn.Authenticator, t http.RoundTripper) error {
+//
+// TODO: Migrate authn and t to options -- remote.Image already takes
+// ImageOptions which should be shared if possible.
+func Write(ref name.Reference, img v1.Image, auth authn.Authenticator, t http.RoundTripper, options ...WriteOption) error {
 	ls, err := img.Layers()
 	if err != nil {
 		return err
@@ -40,37 +57,26 @@ func Write(ref name.Reference, img v1.Image, auth authn.Authenticator, t http.Ro
 	if err != nil {
 		return err
 	}
-	w := writer{
-		ref:     ref,
-		client:  &http.Client{Transport: tr},
-		img:     img,
+	w := &writer{
+		ref:    ref,
+		client: &http.Client{Transport: tr},
+		img:    img,
 	}
 
-	bs, err := img.BlobSet()
-	if err != nil {
-		return err
-	}
-
-	// Spin up go routines to publish each of the members of BlobSet(),
-	// and use an error channel to collect their results.
-	errCh := make(chan error)
-	defer close(errCh)
-	for h := range bs {
-		go func(h v1.Hash) {
-			errCh <- w.uploadOne(h)
-		}(h)
-	}
-
-	// Now wait for all of the blob uploads to complete.
-	var errors []error
-	for _ = range bs {
-		if err := <-errCh; err != nil {
-			errors = append(errors, err)
+	for _, opt := range options {
+		if err := opt(w); err != nil {
+			return err
 		}
 	}
-	if len(errors) > 0 {
-		// Return the first error we encountered.
-		return errors[0]
+
+	if w.streaming {
+		if err := w.streamWrite(); err != nil {
+			return err
+		}
+	} else {
+		if err := w.bufferWrite(); err != nil {
+			return err
+		}
 	}
 
 	// With all of the constituent elements uploaded, upload the manifest
@@ -80,9 +86,46 @@ func Write(ref name.Reference, img v1.Image, auth authn.Authenticator, t http.Ro
 
 // writer writes the elements of an image to a remote image reference.
 type writer struct {
-	ref     name.Reference
-	client  *http.Client
-	img     v1.Image
+	ref       name.Reference
+	client    *http.Client
+	img       v1.Image
+	streaming bool
+}
+
+// bufferWrite uploads layers by first buffering and calculating hashes of each
+// layer.
+func (w *writer) bufferWrite() error {
+	bs, err := w.img.BlobSet()
+	if err != nil {
+		return err
+	}
+
+	// Spin up go routines to publish each of the members of BlobSet(),
+	// and use an error channel to collect their results.
+	var g errgroup.Group
+	for h := range bs {
+		h := h
+		g.Go(func() error {
+			return w.uploadOne(h)
+		})
+	}
+	return g.Wait()
+}
+
+func (w *writer) streamWrite() error {
+	ls, err := w.img.Layers()
+	if err != nil {
+		return err
+	}
+
+	var g errgroup.Group
+	for _, l := range ls {
+		l := l
+		g.Go(func() error {
+			return w.streamUploadOne(l)
+		})
+	}
+	return g.Wait()
 }
 
 // url returns a url.Url for the specified path in the context of this remote image reference.
@@ -136,20 +179,14 @@ func (w *writer) checkExisting(h v1.Hash) (bool, error) {
 // On success, the layer was either mounted (nothing more to do) or a blob
 // upload was initiated and the body of that blob should be sent to the returned
 // location.
-func (w *writer) initiateUpload(h v1.Hash) (location string, mounted bool, err error) {
+func (w *writer) initiateUpload(from, mount string) (location string, mounted bool, err error) {
 	u := w.url(fmt.Sprintf("/v2/%s/blobs/uploads/", w.ref.Context().RepositoryStr()))
-	uv := url.Values{
-		"mount": []string{h.String()},
+	uv := url.Values{}
+	if from != "" {
+		uv["from"] = []string{from}
 	}
-	l, err := w.img.LayerByDigest(h)
-	if err != nil {
-		return "", false, err
-	}
-
-	if ml, ok := l.(*MountableLayer); ok {
-		if w.ref.Context().RegistryStr() == ml.Reference.Context().RegistryStr() {
-			uv["from"] = []string{ml.Reference.Context().RepositoryStr()}
-		}
+	if mount != "" {
+		uv["mount"] = []string{mount}
 	}
 	u.RawQuery = uv.Encode()
 
@@ -181,17 +218,8 @@ func (w *writer) initiateUpload(h v1.Hash) (location string, mounted bool, err e
 // streamBlob streams the contents of the blob to the specified location.
 // On failure, this will return an error.  On success, this will return the location
 // header indicating how to commit the streamed blob.
-func (w *writer) streamBlob(h v1.Hash, streamLocation string) (commitLocation string, err error) {
-	l, err := w.img.LayerByDigest(h)
-	if err != nil {
-		return "", err
-	}
-	blob, err := l.Compressed()
-	if err != nil {
-		return "", err
-	}
+func (w *writer) streamBlob(blob io.ReadCloser, streamLocation string) (commitLocation string, err error) {
 	defer blob.Close()
-
 	req, err := http.NewRequest(http.MethodPatch, streamLocation, blob)
 	if err != nil {
 		return "", err
@@ -212,31 +240,68 @@ func (w *writer) streamBlob(h v1.Hash, streamLocation string) (commitLocation st
 	return w.nextLocation(resp)
 }
 
-// commitBlob commits this blob by sending a PUT to the location returned from streaming the blob.
-func (w *writer) commitBlob(h v1.Hash, location string) (err error) {
+// commitBlob commits this blob by sending a PUT to the location returned from
+// streaming the blob.
+//
+// It returns the digest reported by the registry, in case the blob was
+// streamed, and any error encountered during commit.
+func (w *writer) commitBlob(location, digest string) (string, error) {
 	u, err := url.Parse(location)
 	if err != nil {
-		return err
+		return "", err
 	}
 	v := u.Query()
-	v.Set("digest", h.String())
+	v.Set("digest", digest)
 	u.RawQuery = v.Encode()
 
 	req, err := http.NewRequest(http.MethodPut, u.String(), nil)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	resp, err := w.client.Do(req)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer resp.Body.Close()
 
-	return CheckError(resp, http.StatusCreated)
+	if err := CheckError(resp, http.StatusCreated); err != nil {
+		return "", err
+	}
+
+	return resp.Header.Get("Docker-Content-Digest"), err
 }
 
-// uploadOne performs a complete upload of a single layer.
+// streamUploadOne performs a complete upload of a single layer.
+func (w *writer) streamUploadOne(l v1.Layer) error {
+	location, mounted, err := w.initiateUpload("", "") // No ?from and no ?mount params
+	if err != nil {
+		return err
+	}
+	if mounted {
+		panic("we mounted somehow?!")
+	}
+
+	// TODO
+	blob, err := l.Compressed()
+	if err != nil {
+		return err
+	}
+
+	location, err = w.streamBlob(blob, location)
+	if err != nil {
+		return err
+	}
+
+	dig, err := w.commitBlob(location, "")
+	if err != nil {
+		return err
+	}
+	log.Printf("streamed blob: %s", dig)
+	return nil
+}
+
+// uploadOne performs a complete upload of a single layer by its hash.
 func (w *writer) uploadOne(h v1.Hash) error {
 	existing, err := w.checkExisting(h)
 	if err != nil {
@@ -247,7 +312,21 @@ func (w *writer) uploadOne(h v1.Hash) error {
 		return nil
 	}
 
-	location, mounted, err := w.initiateUpload(h)
+	l, err := w.img.LayerByDigest(h)
+	if err != nil {
+		return err
+	}
+	mount := h.String()
+
+	// If the layer is mountable, specify a ?from query param.
+	var from string
+	if ml, ok := l.(*MountableLayer); ok {
+		if w.ref.Context().RegistryStr() == ml.Reference.Context().RegistryStr() {
+			from = ml.Reference.Context().RepositoryStr()
+		}
+	}
+
+	location, mounted, err := w.initiateUpload(from, mount)
 	if err != nil {
 		return err
 	} else if mounted {
@@ -255,12 +334,17 @@ func (w *writer) uploadOne(h v1.Hash) error {
 		return nil
 	}
 
-	location, err = w.streamBlob(h, location)
+	blob, err := l.Compressed()
 	if err != nil {
 		return err
 	}
 
-	if err := w.commitBlob(h, location); err != nil {
+	location, err = w.streamBlob(blob, location)
+	if err != nil {
+		return err
+	}
+
+	if _, err := w.commitBlob(location, h.String()); err != nil {
 		return err
 	}
 	log.Printf("pushed blob %v", h)
