@@ -30,6 +30,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 )
 
@@ -233,19 +234,19 @@ func TestMutateConfig(t *testing.T) {
 	}
 
 	if manifestsAreEqual(t, source, result) {
-		t.Fatal("mutating the config MUST mutate the manifest")
+		t.Error("mutating the config MUST mutate the manifest")
 	}
 
 	if configFilesAreEqual(t, source, result) {
-		t.Fatal("mutating the config did not mutate the config file")
+		t.Error("mutating the config did not mutate the config file")
 	}
 
 	if configSizesAreEqual(t, source, result) {
-		t.Fatal("adding an enviornment variable MUST change the config file size")
+		t.Error("adding an environment variable MUST change the config file size")
 	}
 
 	if !reflect.DeepEqual(cfg.Config.Env, newEnv) {
-		t.Fatalf("incorrect environment set %v!=%v", cfg.Config.Env, newEnv)
+		t.Errorf("incorrect environment set %v!=%v", cfg.Config.Env, newEnv)
 	}
 }
 
@@ -254,16 +255,16 @@ func TestMutateCreatedAt(t *testing.T) {
 	want := time.Now().Add(-2 * time.Minute)
 	result, err := CreatedAt(source, v1.Time{want})
 	if err != nil {
-		t.Fatalf("failed to mutate a config: %v", err)
+		t.Fatalf("CreatedAt: %v", err)
 	}
 
 	if configDigestsAreEqual(t, source, result) {
-		t.Fatal("mutating the created time MUST mutate the config digest")
+		t.Errorf("mutating the created time MUST mutate the config digest")
 	}
 
 	got := getConfigFile(t, result).Created.Time
 	if got != want {
-		t.Fatalf("mutating the created time MUST mutate the time from %v to %v", got, want)
+		t.Errorf("mutating the created time MUST mutate the time from %v to %v", got, want)
 	}
 }
 
@@ -299,6 +300,74 @@ func TestLayerTime(t *testing.T) {
 
 		assertMTime(t, result, expectedTime)
 	}
+}
+
+func TestAppendStreamableLayer(t *testing.T) {
+	img, err := AppendLayers(
+		sourceImage(t),
+		remote.NewStreamableLayer(ioutil.NopCloser(strings.NewReader(strings.Repeat("a", 100)))),
+		remote.NewStreamableLayer(ioutil.NopCloser(strings.NewReader(strings.Repeat("b", 100)))),
+		remote.NewStreamableLayer(ioutil.NopCloser(strings.NewReader(strings.Repeat("c", 100)))),
+	)
+	if err != nil {
+		t.Fatalf("AppendLayers: %v", err)
+	}
+
+	// Until the streams are consumed, the image manifest is not yet computed.
+	if _, err := img.Manifest(); err != remote.ErrNotComputed {
+		t.Errorf("Manifest: got %v, want %v", err, remote.ErrNotComputed)
+	}
+
+	// We can still get Layers while some are not yet computed.
+	ls, err := img.Layers()
+	if err != nil {
+		t.Errorf("Layers: %v", err)
+	}
+	wantDigests := []string{
+		"sha256:911bae01ac814b5b66df483f8a3af7f298e1c12d420f497188a283aff1b552f8",
+		"sha256:d43d58828b9428b70de9b4113032851e9bd933b1111bb59fb0e5da189aa941ee",
+		"sha256:ef94ff75831ec5ca7792d2fc953d1f5e0948cdb89477762aaff0cb0fd1b3f013",
+	}
+	for i, l := range ls[1:] {
+		rc, err := l.Compressed()
+		if err != nil {
+			t.Errorf("Layer %d Compressed: %v", i, err)
+		}
+
+		// Consume the layer's stream and close it to compute the
+		// layer's metadata.
+		if _, err := io.Copy(ioutil.Discard, rc); err != nil {
+			t.Errorf("Reading layer %d: %v", i, err)
+		}
+		if err := rc.Close(); err != nil {
+			t.Errorf("Closing layer %d: %v", i, err)
+		}
+
+		// The layer's metadata is now available.
+		h, err := l.Digest()
+		if err != nil {
+			t.Errorf("Digest after consuming layer %d: %v", i, err)
+		}
+		if h.String() != wantDigests[i] {
+			t.Errorf("Layer %d digest got %q, want %q", i, h, wantDigests[i])
+		}
+	}
+
+	// Now that the streamable layers have been consumed, the image's
+	// manifest can be computed.
+	if _, err := img.Manifest(); err != nil {
+		t.Errorf("Manifest: %v", err)
+	}
+
+	h, err := img.Digest()
+	if err != nil {
+		t.Errorf("Digest: %v", err)
+	}
+	wantDigest := "sha256:56621515959c8d803d7eecdecbb69da9702336c2a574f24ca77ffd1a4b91bdd1"
+	if h.String() != wantDigest {
+		t.Errorf("Image digest got %q, want %q", h, wantDigest)
+	}
+
 }
 
 func assertMTime(t *testing.T, layer v1.Layer, expectedTime time.Time) {

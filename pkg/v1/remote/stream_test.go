@@ -25,6 +25,8 @@ import (
 	"testing"
 
 	"github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/mutate"
+	"github.com/google/go-containerregistry/pkg/v1/random"
 )
 
 const (
@@ -197,4 +199,13 @@ func TestStreamableLayerFromTarball(t *testing.T) {
 	if got.String() != wantDigest {
 		t.Errorf("Digest: got %q, want %q", got.String(), wantDigest)
 	}
+}
+
+func TestAppendedStreamableLayer(t *testing.T) {
+	base := random.Image(100, 4)
+	mutate.Append(base,
+		StreamableLayer(ioutil.NopCloser(strings.NewReader(strings.Repeat("a", 100)))),
+		StreamableLayer(ioutil.NopCloser(strings.NewReader(strings.Repeat("b", 100)))),
+		StreamableLayer(ioutil.NopCloser(strings.NewReader(strings.Repeat("c", 100)))),
+	)
 }
