@@ -25,8 +25,6 @@ import (
 	"testing"
 
 	"github.com/google/go-containerregistry/pkg/v1"
-	"github.com/google/go-containerregistry/pkg/v1/mutate"
-	"github.com/google/go-containerregistry/pkg/v1/random"
 )
 
 const (
@@ -122,7 +120,7 @@ func TestStreamableLayerUncompressed(t *testing.T) {
 
 // Streaming a huge random layer through StreamableLayer computes its
 // digest/diffID/size, without buffering.
-func TestLargeStreamedLayer(t *testing.T) {
+func TestLargeStreamableLayer(t *testing.T) {
 	n := int64(100000000)
 	sl := NewStreamableLayer(ioutil.NopCloser(io.LimitReader(rand.Reader, n)))
 	rc, err := sl.Uncompressed()
@@ -192,20 +190,9 @@ func TestStreamableLayerFromTarball(t *testing.T) {
 	}
 
 	wantDigest := "sha256:a50b9da8ea0a16cc6397af5cbb134ecbcd6e673fad3ea0a85b14146aae7de793"
-	got, err := sl.Digest()
-	if err != nil {
-		t.Fatalf("Digest: %v", err)
-	}
-	if got.String() != wantDigest {
+	if got, err := sl.Digest(); err != nil {
+		t.Errorf("Digest: %v", err)
+	} else if got.String() != wantDigest {
 		t.Errorf("Digest: got %q, want %q", got.String(), wantDigest)
 	}
-}
-
-func TestAppendedStreamableLayer(t *testing.T) {
-	base := random.Image(100, 4)
-	mutate.Append(base,
-		StreamableLayer(ioutil.NopCloser(strings.NewReader(strings.Repeat("a", 100)))),
-		StreamableLayer(ioutil.NopCloser(strings.NewReader(strings.Repeat("b", 100)))),
-		StreamableLayer(ioutil.NopCloser(strings.NewReader(strings.Repeat("c", 100)))),
-	)
 }

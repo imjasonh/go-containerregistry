@@ -195,9 +195,7 @@ func (w *writer) commitBlob(location, digest string) error {
 		return err
 	}
 	v := u.Query()
-	if digest != "" {
-		v.Set("digest", digest)
-	}
+	v.Set("digest", digest)
 	u.RawQuery = v.Encode()
 
 	req, err := http.NewRequest(http.MethodPut, u.String(), nil)
