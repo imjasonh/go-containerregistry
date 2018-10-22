@@ -267,10 +267,16 @@ func (w *writer) uploadOne(l v1.Layer) error {
 		return err
 	}
 
+	h, err := l.Digest()
+	if err != nil {
+		return err
+	}
+	digest = h.String()
+
 	if err := w.commitBlob(location, digest); err != nil {
 		return err
 	}
-	log.Printf("pushed blob %s", digest)
+	log.Printf("pushed blob: %s", digest)
 	return nil
 }
 
