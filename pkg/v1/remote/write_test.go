@@ -486,6 +486,59 @@ func TestStreamBlob(t *testing.T) {
 	}
 }
 
+func TestStreamStreamableLayer(t *testing.T) {
+	expectedPath := "/vWhatever/I/decide"
+	expectedCommitLocation := "https://commit.io/v12/blob"
+	w, closer, err := setupWriter("what/ever", nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			t.Errorf("Method; got %v, want %v", r.Method, http.MethodPatch)
+		}
+		if r.URL.Path != expectedPath {
+			t.Errorf("URL; got %v, want %v", r.URL.Path, expectedPath)
+		}
+
+		got, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("ReadAll: %v", err)
+		}
+
+		h, size, err := v1.SHA256(bytes.NewReader(got))
+		if err != nil {
+			t.Errorf("SHA256: %v", err)
+		}
+		if size != n {
+			t.Errorf("Received %d bytes, want %d", size, n)
+		}
+		if h.String() != wantDigest {
+			t.Errorf("Received bytes with digest %q, want %q", h.String(), wantDigest)
+		}
+
+		// TODO compare digest
+
+		w.Header().Set("Location", expectedCommitLocation)
+		http.Error(w, "Created", http.StatusCreated)
+	}))
+	if err != nil {
+		t.Fatalf("setupWriter() = %v", err)
+	}
+	defer closer.Close()
+
+	streamLocation := w.url(expectedPath)
+	sl := NewStreamableLayer(ioutil.NopCloser(bytes.NewReader(bytes.Repeat([]byte{'a'}, n))))
+	blob, err := sl.Uncompressed()
+	if err != nil {
+		t.Fatalf("layer.Compressed: %v", err)
+	}
+
+	commitLocation, err := w.streamBlob(blob, streamLocation.String())
+	if err != nil {
+		t.Errorf("streamBlob: %v", err)
+	}
+	if commitLocation != expectedCommitLocation {
+		t.Errorf("streamBlob(); got %v, want %v", commitLocation, expectedCommitLocation)
+	}
+}
+
 func TestCommitBlob(t *testing.T) {
 	img := setupImage(t)
 	h := mustConfigName(t, img)

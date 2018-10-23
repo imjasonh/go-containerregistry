@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/tarball"
 )
 
 const (
@@ -50,7 +51,7 @@ func TestStreamableLayerZero(t *testing.T) {
 }
 
 func TestStreamableLayerCompressed(t *testing.T) {
-	sl := NewStreamableLayer(ioutil.NopCloser(bytes.NewBufferString(strings.Repeat("a", n))))
+	sl := NewStreamableLayer(ioutil.NopCloser(bytes.NewBuffer(bytes.Repeat([]byte{'a'}, n))))
 
 	// This will consume the originally uncompressed data and produce
 	// compressed data, and closing will populate the StreamableLayer's
@@ -85,7 +86,7 @@ func TestStreamableLayerCompressed(t *testing.T) {
 }
 
 func TestStreamableLayerUncompressed(t *testing.T) {
-	sl := NewStreamableLayer(ioutil.NopCloser(bytes.NewBufferString(strings.Repeat("a", n))))
+	sl := NewStreamableLayer(ioutil.NopCloser(bytes.NewBuffer(bytes.Repeat([]byte{'a'}, n))))
 
 	// This will consume the given ReadCloser, and closing will populate
 	// the StreamableLayer's digest, diffID and size.
@@ -154,7 +155,6 @@ func TestLargeStreamableLayer(t *testing.T) {
 func TestStreamableLayerFromTarball(t *testing.T) {
 	pr, pw := io.Pipe()
 	tw := tar.NewWriter(pw)
-
 	go func() {
 		// "Stream" a bunch of files into the layer.
 		pw.CloseWithError(func() error {
@@ -194,5 +194,20 @@ func TestStreamableLayerFromTarball(t *testing.T) {
 		t.Errorf("Digest: %v", err)
 	} else if got.String() != wantDigest {
 		t.Errorf("Digest: got %q, want %q", got.String(), wantDigest)
+	}
+}
+
+func TestDigest(t *testing.T) {
+	rc := ioutil.NopCloser(bytes.NewBuffer(bytes.Repeat([]byte{'a'}, n)))
+	tl, err := tarball.LayerFromOpener(func() (io.ReadCloser, error) {
+		return rc, nil
+	})
+	if err != nil {
+		t.Fatalf("LayerFromOpener: %v", err)
+	}
+	if d, err := tl.Digest(); err != nil {
+		t.Errorf("Digest: %v", err)
+	} else if d.String() != wantDigest {
+		t.Errorf("tarball Digest got %q, want %q", d.String(), wantDigest)
 	}
 }
