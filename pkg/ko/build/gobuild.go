@@ -132,7 +132,7 @@ func tarBinary(binary string) (*bytes.Buffer, error) {
 	header := &tar.Header{
 		Name:     appPath,
 		Size:     stat.Size(),
-		Typeflag: tar.TypeReg,
+		Typeflag: tar.TypeRegA,
 		// Use a fixed Mode, so that this isn't sensitive to the directory and umask
 		// under which it was created. Additionally, windows can only set 0222,
 		// 0444, or 0666, none of which are executable.
@@ -205,7 +205,7 @@ func tarKoData(importpath string) (*bytes.Buffer, error) {
 		if err := tw.WriteHeader(&tar.Header{
 			Name:     newPath,
 			Size:     info.Size(),
-			Typeflag: tar.TypeReg,
+			Typeflag: tar.TypeRegA,
 			// Use a fixed Mode, so that this isn't sensitive to the directory and umask
 			// under which it was created. Additionally, windows can only set 0222,
 			// 0444, or 0666, none of which are executable.
