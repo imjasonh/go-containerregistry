@@ -229,12 +229,15 @@ func (i *image) Layers() ([]v1.Layer, error) {
 	}
 	ls := make([]v1.Layer, 0, len(diffIDs))
 	for _, h := range diffIDs {
-		l, err := i.LayerByDiffID(h)
-		if err != nil {
-			return nil, err
+		if layer, ok := i.diffIDMap[h]; ok {
+			ls = append(ls, layer)
 		}
-		ls = append(ls, l)
 	}
+	bls, err := i.base.Layers()
+	if err != nil {
+		return nil, err
+	}
+	ls = append(ls, bls...)
 	return ls, nil
 }
 
@@ -284,29 +287,6 @@ func (i *image) RawManifest() ([]byte, error) {
 		return nil, err
 	}
 	return json.Marshal(i.manifest)
-}
-
-// LayerByDigest returns a Layer for interacting with a particular layer of
-// the image, looking it up by "digest" (the compressed hash).
-func (i *image) LayerByDigest(h v1.Hash) (v1.Layer, error) {
-	if cn, err := i.ConfigName(); err != nil {
-		return nil, err
-	} else if h == cn {
-		return partial.ConfigLayer(i)
-	}
-	if layer, ok := i.digestMap[h]; ok {
-		return layer, nil
-	}
-	return i.base.LayerByDigest(h)
-}
-
-// LayerByDiffID is an analog to LayerByDigest, looking up by "diff id"
-// (the uncompressed hash).
-func (i *image) LayerByDiffID(h v1.Hash) (v1.Layer, error) {
-	if layer, ok := i.diffIDMap[h]; ok {
-		return layer, nil
-	}
-	return i.base.LayerByDiffID(h)
 }
 
 func validate(adds []Addendum) error {

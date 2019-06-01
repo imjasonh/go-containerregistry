@@ -45,12 +45,4 @@ type Image interface {
 
 	// RawManifest returns the serialized bytes of Manifest()
 	RawManifest() ([]byte, error)
-
-	// LayerByDigest returns a Layer for interacting with a particular layer of
-	// the image, looking it up by "digest" (the compressed hash).
-	LayerByDigest(Hash) (Layer, error)
-
-	// LayerByDiffID is an analog to LayerByDigest, looking up by "diff id"
-	// (the uncompressed hash).
-	LayerByDiffID(Hash) (Layer, error)
 }

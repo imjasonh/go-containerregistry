@@ -15,6 +15,7 @@
 package remote
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -102,10 +103,25 @@ func (r *remoteImage) RawConfigFile() ([]byte, error) {
 		return nil, err
 	}
 
-	cl, err := r.LayerByDigest(m.Config.Digest)
+	var cl v1.Layer
+	ls, err := r.Layers()
 	if err != nil {
 		return nil, err
 	}
+	for _, l := range ls {
+		h, err := l.Digest()
+		if err != nil {
+			return nil, err
+		}
+		if h == m.Config.Digest {
+			cl = l
+			break
+		}
+	}
+	if cl == nil {
+		return nil, errors.New("config layer not found")
+	}
+
 	body, err := cl.Compressed()
 	if err != nil {
 		return nil, err
@@ -117,6 +133,30 @@ func (r *remoteImage) RawConfigFile() ([]byte, error) {
 		return nil, err
 	}
 	return r.config, nil
+}
+
+func (r *remoteImage) Layers() ([]v1.Layer, error) {
+	ci, err := partial.CompressedToImage(r)
+	if err != nil {
+		return nil, err
+	}
+	hs, err := partial.FSLayers(ci)
+	if err != nil {
+		return nil, err
+	}
+	ls := make([]v1.Layer, 0, len(hs))
+	for _, h := range hs {
+		l := &remoteLayer{
+			ri:     r,
+			digest: h,
+		}
+		cl, err := partial.CompressedToLayer(l)
+		if err != nil {
+			return nil, err
+		}
+		ls = append(ls, cl)
+	}
+	return ls, nil
 }
 
 // remoteLayer implements partial.CompressedLayer

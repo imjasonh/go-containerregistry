@@ -94,29 +94,3 @@ func (i *image) Layers() ([]v1.Layer, error) {
 	}
 	return out, nil
 }
-
-func (i *image) LayerByDigest(h v1.Hash) (v1.Layer, error) {
-	l, err := i.c.Get(h)
-	if err == ErrNotFound {
-		// Not cached, get it and write it.
-		l, err := i.Image.LayerByDigest(h)
-		if err != nil {
-			return nil, err
-		}
-		return i.c.Put(l)
-	}
-	return l, err
-}
-
-func (i *image) LayerByDiffID(h v1.Hash) (v1.Layer, error) {
-	l, err := i.c.Get(h)
-	if err == ErrNotFound {
-		// Not cached, get it and write it.
-		l, err := i.Image.LayerByDiffID(h)
-		if err != nil {
-			return nil, err
-		}
-		return i.c.Put(l)
-	}
-	return l, err
-}

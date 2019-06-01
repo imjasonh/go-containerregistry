@@ -217,7 +217,6 @@ func TestAppendLayers(t *testing.T) {
 
 	assertLayerOrderMatchesConfig(t, result)
 	assertLayerOrderMatchesManifest(t, result)
-	assertQueryingForLayerSucceeds(t, result, layers[1])
 }
 
 func TestMutateConfig(t *testing.T) {
@@ -398,38 +397,6 @@ func assertMTime(t *testing.T, layer v1.Layer, expectedTime time.Time) {
 		if mtime.Equal(expectedTime) == false {
 			t.Errorf("unexpected mod time for layer. expected %v, got %v.", expectedTime, mtime)
 		}
-	}
-
-}
-func assertQueryingForLayerSucceeds(t *testing.T, image v1.Image, layer v1.Layer) {
-	t.Helper()
-
-	queryTestCases := []struct {
-		name          string
-		expectedLayer v1.Layer
-		hash          func() (v1.Hash, error)
-		query         func(v1.Hash) (v1.Layer, error)
-	}{
-		{"digest", layer, layer.Digest, image.LayerByDigest},
-		{"diff id", layer, layer.DiffID, image.LayerByDiffID},
-	}
-
-	for _, tc := range queryTestCases {
-		t.Run(fmt.Sprintf("layer by %s", tc.name), func(t *testing.T) {
-			hash, err := tc.hash()
-			if err != nil {
-				t.Fatalf("Unable to fetch %s for layer: %v", tc.name, err)
-			}
-
-			gotLayer, err := tc.query(hash)
-			if err != nil {
-				t.Fatalf("Unable to fetch layer from %s: %v", tc.name, err)
-			}
-
-			if gotLayer != tc.expectedLayer {
-				t.Fatalf("Querying layer using %s does not return the expected layer %+v %+v", tc.name, gotLayer, tc.expectedLayer)
-			}
-		})
 	}
 
 }

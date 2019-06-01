@@ -51,27 +51,3 @@ func (mi *mountableImage) Layers() ([]v1.Layer, error) {
 	}
 	return mls, nil
 }
-
-// LayerByDigest implements v1.Image
-func (mi *mountableImage) LayerByDigest(d v1.Hash) (v1.Layer, error) {
-	l, err := mi.Image.LayerByDigest(d)
-	if err != nil {
-		return nil, err
-	}
-	return &MountableLayer{
-		Layer:     l,
-		Reference: mi.Reference,
-	}, nil
-}
-
-// LayerByDiffID implements v1.Image
-func (mi *mountableImage) LayerByDiffID(d v1.Hash) (v1.Layer, error) {
-	l, err := mi.Image.LayerByDiffID(d)
-	if err != nil {
-		return nil, err
-	}
-	return &MountableLayer{
-		Layer:     l,
-		Reference: mi.Reference,
-	}, nil
-}

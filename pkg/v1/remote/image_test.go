@@ -345,10 +345,11 @@ func TestImage(t *testing.T) {
 		t.Errorf("RawManifest made %v requests, expected 1", manifestReqCount)
 	}
 
-	l, err := rmt.LayerByDigest(layerDigest)
+	ls, err := rmt.Layers()
 	if err != nil {
-		t.Errorf("LayerByDigest() = %v", err)
+		t.Errorf("Layers() = %v", err)
 	}
+	l := ls[0]
 	// BlobSize should not HEAD.
 	size, err := l.Size()
 	if err != nil {
