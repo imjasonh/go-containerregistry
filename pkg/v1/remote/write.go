@@ -560,27 +560,5 @@ func WriteLayer(repo name.Repository, layer v1.Layer, options ...Option) error {
 
 // Tag adds a tag to the given Taggable.
 func Tag(tag name.Tag, t Taggable, options ...Option) error {
-	o, err := makeOptions(tag.Context(), options...)
-	if err != nil {
-		return err
-	}
-	scopes := []string{tag.Scope(transport.PushScope)}
-
-	// TODO: This *always* does a token exchange. For some registries,
-	// that's pretty slow. Some ideas;
-	// * Tag could take a list of tags.
-	// * Allow callers to pass in a transport.Transport, typecheck
-	//   it to allow them to reuse the transport across multiple calls.
-	// * WithTag option to do multiple manifest PUTs in commitImage.
-	tr, err := transport.New(tag.Context().Registry, o.auth, o.transport, scopes)
-	if err != nil {
-		return err
-	}
-	w := writer{
-		repo:    tag.Context(),
-		client:  &http.Client{Transport: tr},
-		context: o.context,
-	}
-
-	return w.commitImage(t, tag)
+	return MultiTag(map[name.Tag]Taggable{tag: t}, options...)
 }

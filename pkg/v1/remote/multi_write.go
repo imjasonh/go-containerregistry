@@ -30,6 +30,75 @@ import (
 // TODO(jasonhall): Make this an Option.
 const jobs = 4
 
+// MultiTag tags the given Images or ImageIndexes with the given Tags in
+// parallel, as efficiently as possible by avoiding unnecessary auth
+// handshakes.
+//
+// Current limitations:
+// - All refs must share the same repository.
+func MultiTag(m map[name.Tag]Taggable, options ...Option) error {
+	// Determine the repository being pushed to; if asked to push to
+	// multiple repositories, give up.
+	var repo, zero name.Repository
+	for ref := range m {
+		if repo == zero {
+			repo = ref.Context()
+		} else if ref.Context() != repo {
+			return fmt.Errorf("MultiWrite can only push to the same repository (saw %q and %q)", repo, ref.Context())
+		}
+	}
+
+	o, err := makeOptions(repo, options...)
+	if err != nil {
+		return err
+	}
+	scopes := []string{repo.Scope(transport.PushScope)}
+
+	tr, err := transport.New(repo.Registry, o.auth, o.transport, scopes)
+	if err != nil {
+		return err
+	}
+	w := writer{
+		repo:    repo,
+		client:  &http.Client{Transport: tr},
+		context: o.context,
+	}
+	rm := map[name.Reference]Taggable{}
+	for k, v := range m {
+		rm[k] = v
+	}
+	return commitMany(w, rm)
+}
+
+func commitMany(w writer, m map[name.Reference]Taggable) error {
+	var g errgroup.Group
+	// With all of the constituent elements uploaded, upload the manifests
+	// to commit the images and indexes, and collect any errors.
+	type task struct {
+		i   Taggable
+		ref name.Reference
+	}
+	taskChan := make(chan task, 2*jobs)
+	for i := 0; i < jobs; i++ {
+		// Start N workers consuming tasks to upload manifests.
+		g.Go(func() error {
+			for t := range taskChan {
+				if err := w.commitImage(t.i, t.ref); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	}
+	go func() {
+		for ref, i := range m {
+			taskChan <- task{i, ref}
+		}
+		close(taskChan)
+	}()
+	return g.Wait()
+}
+
 // MultiWrite writes the given Images or ImageIndexes to the given refs, as
 // efficiently as possible, by deduping shared layer blobs and uploading layers
 // in parallel, then uploading all manifests in parallel.
@@ -119,48 +188,20 @@ func MultiWrite(m map[name.Reference]Taggable, options ...Option) error {
 		return err
 	}
 
-	commitMany := func(m map[name.Reference]Taggable) error {
-		// With all of the constituent elements uploaded, upload the manifests
-		// to commit the images and indexes, and collect any errors.
-		type task struct {
-			i   Taggable
-			ref name.Reference
-		}
-		taskChan := make(chan task, 2*jobs)
-		for i := 0; i < jobs; i++ {
-			// Start N workers consuming tasks to upload manifests.
-			g.Go(func() error {
-				for t := range taskChan {
-					if err := w.commitImage(t.i, t.ref); err != nil {
-						return err
-					}
-				}
-				return nil
-			})
-		}
-		go func() {
-			for ref, i := range m {
-				taskChan <- task{i, ref}
-			}
-			close(taskChan)
-		}()
-		return g.Wait()
-	}
 	// Push originally requested image manifests. These have no
 	// dependencies.
-	if err := commitMany(images); err != nil {
+	if err := commitMany(w, images); err != nil {
 		return err
 	}
 	// Push new manifests from lowest levels up.
 	for i := len(newManifests) - 1; i >= 0; i-- {
-		if err := commitMany(newManifests[i]); err != nil {
+		if err := commitMany(w, newManifests[i]); err != nil {
 			return err
 		}
 	}
 	// Push originally requested index manifests, which might depend on
 	// newly discovered manifests.
-	return commitMany(indexes)
-
+	return commitMany(w, indexes)
 }
 
 // addIndexBlobs adds blobs to the set of blobs we intend to upload, and
