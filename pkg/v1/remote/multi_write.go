@@ -89,6 +89,45 @@ func MultiWrite(m map[name.Reference]Taggable, options ...Option) error {
 		repo:    repo,
 		client:  &http.Client{Transport: tr},
 		context: o.context,
+		updates: o.updates,
+		last:    &v1.Update{},
+	}
+
+	// Collect the total size of blobs and manifests we're about to write.
+	if o.updates != nil {
+		defer func() { close(o.updates) }()
+		for _, b := range blobs {
+			size, err := b.Size()
+			if err != nil {
+				return err
+			}
+			w.last.Total += size
+		}
+		countManifest := func(t Taggable) error {
+			b, err := t.RawManifest()
+			if err != nil {
+				return err
+			}
+			w.last.Total += int64(len(b))
+			return nil
+		}
+		for _, i := range images {
+			if err := countManifest(i); err != nil {
+				return err
+			}
+		}
+		for _, nm := range newManifests {
+			for _, i := range nm {
+				if err := countManifest(i); err != nil {
+					return err
+				}
+			}
+		}
+		for _, i := range indexes {
+			if err := countManifest(i); err != nil {
+				return err
+			}
+		}
 	}
 
 	// Upload individual blobs and collect any errors.
@@ -156,7 +195,6 @@ func MultiWrite(m map[name.Reference]Taggable, options ...Option) error {
 	// Push originally requested index manifests, which might depend on
 	// newly discovered manifests.
 	return commitMany(indexes)
-
 }
 
 // addIndexBlobs adds blobs to the set of blobs we intend to upload, and

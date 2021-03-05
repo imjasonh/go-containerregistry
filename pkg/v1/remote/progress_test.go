@@ -138,6 +138,37 @@ func TestWriteIndex_Progress_NotExists(t *testing.T) {
 	*/
 }
 
+func TestMultiWrite_Progress(t *testing.T) {
+	idx, err := random.Index(100000, 10, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := make(chan v1.Update, 1000)
+
+	// Set up a fake registry.
+	s := httptest.NewServer(registry.New())
+	defer s.Close()
+	u, err := url.Parse(s.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst := fmt.Sprintf("%s/test/progress/upload", u.Host)
+	ref, err := name.ParseReference(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := MultiWrite(map[name.Reference]Taggable{
+		ref: idx,
+	}, WithProgress(c)); err != nil {
+		t.Fatalf("MultiWrite: %v", err)
+	}
+
+	if err := checkUpdates(c); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // checkUpdates checks that updates show steady progress toward a total, and
 // don't describe errors.
 func checkUpdates(updates <-chan v1.Update) error {
@@ -153,14 +184,16 @@ func checkUpdates(updates <-chan v1.Update) error {
 			return fmt.Errorf("total changed: was %d, saw %d", total, u.Total)
 		}
 
-		if u.Complete <= high {
+		if u.Complete < high {
 			return fmt.Errorf("saw progress revert: was high of %d, saw %d", high, u.Complete)
 		}
 		high = u.Complete
 	}
 
-	if high != total {
-		return fmt.Errorf("final progress (%d) did not reach total (%d)", high, total)
+	if high > total {
+		return fmt.Errorf("final progress (%d) exceeded total (%d) by %d", high, total, high-total)
+	} else if high < total {
+		return fmt.Errorf("final progress (%d) did not reach total (%d) by %d", high, total, total-high)
 	}
 
 	return nil
