@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/go-containerregistry/pkg/internal/redact"
@@ -32,6 +33,7 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/partial"
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
+	"github.com/google/go-containerregistry/pkg/v1/stream"
 	"github.com/google/go-containerregistry/pkg/v1/types"
 	"golang.org/x/sync/errgroup"
 )
@@ -62,6 +64,33 @@ func Write(ref name.Reference, img v1.Image, options ...Option) error {
 		repo:    ref.Context(),
 		client:  &http.Client{Transport: tr},
 		context: o.context,
+		updates: o.updates,
+		last:    &v1.Update{},
+	}
+
+	if o.updates != nil {
+		for _, l := range ls {
+			if _, ok := l.(*stream.Layer); ok {
+				return errors.New("cannot use stream.Layer and WithProgress")
+			}
+			size, err := l.Size()
+			if err != nil {
+				return err
+			}
+			w.last.Total += size
+		}
+		b, err := img.RawConfigFile()
+		if err != nil {
+			return err
+		}
+		w.last.Total += int64(len(b))
+		b, err = img.RawManifest()
+		if err != nil {
+			return err
+		}
+		w.last.Total += int64(len(b))
+
+		defer func() { close(o.updates) }()
 	}
 
 	// Upload individual layers in goroutines and collect any errors.
@@ -137,6 +166,9 @@ type writer struct {
 	repo    name.Repository
 	client  *http.Client
 	context context.Context
+
+	updates chan<- v1.Update
+	last    *v1.Update
 }
 
 // url returns a url.Url for the specified path in the context of this remote image reference.
@@ -259,10 +291,37 @@ func (w *writer) initiateUpload(from, mount string) (location string, mounted bo
 	}
 }
 
+type progressReader struct {
+	rc io.ReadCloser
+
+	updates chan<- v1.Update
+	last    *v1.Update
+}
+
+func (r *progressReader) Read(b []byte) (int, error) {
+	n, err := r.rc.Read(b)
+	if err != nil {
+		return n, err
+	}
+
+	atomic.AddInt64(&r.last.Complete, int64(n))
+	r.updates <- *r.last
+	return n, err
+}
+
+func (r *progressReader) Close() error {
+	return r.rc.Close()
+}
+
 // streamBlob streams the contents of the blob to the specified location.
 // On failure, this will return an error.  On success, this will return the location
 // header indicating how to commit the streamed blob.
 func (w *writer) streamBlob(ctx context.Context, blob io.ReadCloser, streamLocation string) (commitLocation string, err error) {
+
+	if w.updates != nil {
+		blob = &progressReader{rc: blob, updates: w.updates, last: w.last}
+	}
+
 	req, err := http.NewRequest(http.MethodPatch, streamLocation, blob)
 	if err != nil {
 		return "", err
@@ -308,8 +367,22 @@ func (w *writer) commitBlob(location, digest string) error {
 	return transport.CheckError(resp, http.StatusCreated)
 }
 
+func (w *writer) updateProgress(written int64) {
+	if w.updates == nil {
+		return
+	}
+
+	atomic.AddInt64(&w.last.Complete, int64(written))
+	w.updates <- *w.last
+}
+
 // uploadOne performs a complete upload of a single layer.
 func (w *writer) uploadOne(l v1.Layer) error {
+	size, err := l.Size()
+	if err != nil {
+		return err
+	}
+
 	var from, mount string
 	if h, err := l.Digest(); err == nil {
 		// If we know the digest, this isn't a streaming layer. Do an existence
@@ -319,6 +392,7 @@ func (w *writer) uploadOne(l v1.Layer) error {
 			return err
 		}
 		if existing {
+			w.updateProgress(size)
 			logs.Progress.Printf("existing blob: %v", h)
 			return nil
 		}
@@ -342,6 +416,7 @@ func (w *writer) uploadOne(l v1.Layer) error {
 			if err != nil {
 				return err
 			}
+			w.updateProgress(size)
 			logs.Progress.Printf("mounted blob: %s", h.String())
 			return nil
 		}
@@ -517,11 +592,13 @@ func (w *writer) commitManifest(t Taggable, ref name.Reference) error {
 	defer resp.Body.Close()
 
 	if err := transport.CheckError(resp, http.StatusOK, http.StatusCreated, http.StatusAccepted); err != nil {
+		// TODO: send an error update
 		return err
 	}
 
 	// The image was successfully pushed!
 	logs.Progress.Printf("%v: digest: %v size: %d", ref, desc.Digest, desc.Size)
+	w.updateProgress(int64(len(raw)))
 	return nil
 }
 
@@ -567,6 +644,8 @@ func WriteIndex(ref name.Reference, ii v1.ImageIndex, options ...Option) error {
 		repo:    ref.Context(),
 		client:  &http.Client{Transport: tr},
 		context: o.context,
+		updates: o.updates,
+		last:    &v1.Update{},
 	}
 	return w.writeIndex(ref, ii, options...)
 }
@@ -586,6 +665,23 @@ func WriteLayer(repo name.Repository, layer v1.Layer, options ...Option) error {
 		repo:    repo,
 		client:  &http.Client{Transport: tr},
 		context: o.context,
+		updates: o.updates,
+		last:    &v1.Update{},
+	}
+
+	if o.updates != nil {
+		if _, ok := layer.(*stream.Layer); ok {
+			return errors.New("cannot use stream.Layer and WithProgress")
+		}
+		size, err := layer.Size()
+		// TODO publish update too?
+		if err != nil {
+			return err
+		}
+		w.last.Total = size
+		defer func() {
+			close(o.updates)
+		}()
 	}
 
 	return w.uploadOne(layer)
