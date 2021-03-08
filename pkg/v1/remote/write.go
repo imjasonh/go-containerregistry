@@ -605,7 +605,6 @@ func (w *writer) commitManifest(t Taggable, ref name.Reference) error {
 	defer resp.Body.Close()
 
 	if err := transport.CheckError(resp, http.StatusOK, http.StatusCreated, http.StatusAccepted); err != nil {
-		// TODO: send an error update
 		return err
 	}
 
