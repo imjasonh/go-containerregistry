@@ -14,6 +14,37 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/types"
 )
 
+func TestWriteLayer_Progress(t *testing.T) {
+	l, err := random.Layer(100000, types.OCIUncompressedLayer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := make(chan v1.Update, 200)
+
+	// Set up a fake registry.
+	s := httptest.NewServer(registry.New())
+	defer s.Close()
+	u, err := url.Parse(s.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst := fmt.Sprintf("%s/test/progress/upload", u.Host)
+	ref, err := name.ParseReference(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := WriteLayer(ref.Context(), l, WithProgress(c)); err != nil {
+		t.Fatalf("WriteLayer: %v", err)
+	}
+	if err := checkUpdates(c); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestWriteLayer_Progress_Exists tests progress reporting behavior when the
+// layer already exists in the registry, so writes are skipped, but progress
+// should still be reported in one update.
 func TestWriteLayer_Progress_Exists(t *testing.T) {
 	l, err := random.Layer(1000, types.OCILayer)
 	if err != nil {
@@ -46,39 +77,12 @@ func TestWriteLayer_Progress_Exists(t *testing.T) {
 	}
 }
 
-func TestWriteLayer_Progress_NotExists(t *testing.T) {
-	l, err := random.Layer(100000, types.OCIUncompressedLayer)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c := make(chan v1.Update, 200)
-
-	// Set up a fake registry.
-	s := httptest.NewServer(registry.New())
-	defer s.Close()
-	u, err := url.Parse(s.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dst := fmt.Sprintf("%s/test/progress/upload", u.Host)
-	ref, err := name.ParseReference(dst)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if err := WriteLayer(ref.Context(), l, WithProgress(c)); err != nil {
-		t.Fatalf("WriteLayer: %v", err)
-	}
-	if err := checkUpdates(c); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// TODO mount WriteLayer
+// TODO test for mounting layers
+// TODO test for non-distributable layers
 // TODO retry resets complete
-// TODO non-distributable layers
+// TODO test for failed upload
 
-func TestWrite_Progress_NotExists(t *testing.T) {
+func TestWrite_Progress(t *testing.T) {
 	img, err := random.Image(100000, 10)
 	if err != nil {
 		t.Fatal(err)
@@ -107,7 +111,7 @@ func TestWrite_Progress_NotExists(t *testing.T) {
 	}
 }
 
-func TestWriteIndex_Progress_NotExists(t *testing.T) {
+func TestWriteIndex_Progress(t *testing.T) {
 	idx, err := random.Index(100000, 3, 10)
 	if err != nil {
 		t.Fatal(err)
@@ -169,6 +173,10 @@ func TestMultiWrite_Progress(t *testing.T) {
 	if err := checkUpdates(c); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestWriteLayer_Progress_Retry(t *testing.T) {
+
 }
 
 // checkUpdates checks that updates show steady progress toward a total, and

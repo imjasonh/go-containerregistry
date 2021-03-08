@@ -69,7 +69,7 @@ func Write(ref name.Reference, img v1.Image, options ...Option) error {
 
 	if o.updates != nil {
 		w.last = &v1.Update{}
-		w.last.Total, err = countImage(img)
+		w.last.Total, err = countImage(img, o.allowNondistributableArtifacts)
 		if err != nil {
 			return err
 		}
@@ -293,6 +293,7 @@ func (w *writer) initiateUpload(from, mount string) (location string, mounted bo
 type progressReader struct {
 	rc io.ReadCloser
 
+	count   int64 // number of bytes this reader has read, to support resetting on retry.
 	updates chan<- v1.Update
 	last    *v1.Update
 }
@@ -300,16 +301,26 @@ type progressReader struct {
 func (r *progressReader) Read(b []byte) (int, error) {
 	n, err := r.rc.Read(b)
 	if err != nil {
+		// Decrement progress by the amount this reader has read so
+		// far, resetting it for retry.
+		if err != io.EOF {
+			atomic.AddInt64(&r.last.Complete, -r.count)
+			r.updates <- *r.last
+		}
 		return n, err
 	}
-
+	atomic.AddInt64(&r.count, int64(n))
 	atomic.AddInt64(&r.last.Complete, int64(n))
 	r.updates <- *r.last
-	return n, err
+	return n, nil
 }
 
 func (r *progressReader) Close() error {
-	return r.rc.Close()
+	if err := r.rc.Close(); err != nil {
+		atomic.AddInt64(&r.last.Complete, -r.count)
+		r.updates <- *r.last
+	}
+	return nil
 }
 
 // streamBlob streams the contents of the blob to the specified location.
@@ -365,11 +376,11 @@ func (w *writer) commitBlob(location, digest string) error {
 	return transport.CheckError(resp, http.StatusCreated)
 }
 
-func (w *writer) updateProgress(written int64) {
+// incrProgress increments and sends a progress update, if WithProgress is used.
+func (w *writer) incrProgress(written int64) {
 	if w.updates == nil {
 		return
 	}
-
 	atomic.AddInt64(&w.last.Complete, int64(written))
 	w.updates <- *w.last
 }
@@ -389,7 +400,7 @@ func (w *writer) uploadOne(l v1.Layer) error {
 			if err != nil {
 				return err
 			}
-			w.updateProgress(size)
+			w.incrProgress(size)
 			logs.Progress.Printf("existing blob: %v", h)
 			return nil
 		}
@@ -413,7 +424,7 @@ func (w *writer) uploadOne(l v1.Layer) error {
 			if err != nil {
 				return err
 			}
-			w.updateProgress(size)
+			w.incrProgress(size)
 			h, err := l.Digest()
 			if err != nil {
 				return err
@@ -600,7 +611,7 @@ func (w *writer) commitManifest(t Taggable, ref name.Reference) error {
 
 	// The image was successfully pushed!
 	logs.Progress.Printf("%v: digest: %v size: %d", ref, desc.Digest, desc.Size)
-	w.updateProgress(int64(len(raw)))
+	w.incrProgress(int64(len(raw)))
 	return nil
 }
 
@@ -695,7 +706,7 @@ func WriteIndex(ref name.Reference, ii v1.ImageIndex, options ...Option) error {
 
 	if o.updates != nil {
 		w.last = &v1.Update{}
-		w.last.Total, err = countIndex(ii)
+		w.last.Total, err = countIndex(ii, o.allowNondistributableArtifacts)
 		if err != nil {
 			return err
 		}
@@ -707,13 +718,22 @@ func WriteIndex(ref name.Reference, ii v1.ImageIndex, options ...Option) error {
 
 // countImage counts the total size of all layers + config blob + manifest for
 // an image. It does not attempt to de-dupe duplicate layers.
-func countImage(img v1.Image) (int64, error) {
+func countImage(img v1.Image, allowNondistributableArtifacts bool) (int64, error) {
 	var total int64
 	ls, err := img.Layers()
 	if err != nil {
 		return 0, err
 	}
 	for _, l := range ls {
+		// Handle foreign layers.
+		mt, err := l.MediaType()
+		if err != nil {
+			return 0, err
+		}
+		if !mt.IsDistributable() && !allowNondistributableArtifacts {
+			continue
+		}
+
 		if _, ok := l.(*stream.Layer); ok {
 			return 0, errors.New("cannot use stream.Layer and WithProgress")
 		}
@@ -738,7 +758,7 @@ func countImage(img v1.Image) (int64, error) {
 
 // countIndex counts the total size of all images + sub-indexes for an index.
 // It does not attempt to de-dupe duplicate images, etc.
-func countIndex(idx v1.ImageIndex) (int64, error) {
+func countIndex(idx v1.ImageIndex, allowNondistributableArtifacts bool) (int64, error) {
 	var total int64
 	mf, err := idx.IndexManifest()
 	if err != nil {
@@ -752,7 +772,7 @@ func countIndex(idx v1.ImageIndex) (int64, error) {
 			if err != nil {
 				return 0, err
 			}
-			size, err := countIndex(sidx)
+			size, err := countIndex(sidx, allowNondistributableArtifacts)
 			if err != nil {
 				return 0, err
 			}
@@ -762,7 +782,7 @@ func countIndex(idx v1.ImageIndex) (int64, error) {
 			if err != nil {
 				return 0, err
 			}
-			size, err := countImage(simg)
+			size, err := countImage(simg, allowNondistributableArtifacts)
 			if err != nil {
 				return 0, err
 			}
