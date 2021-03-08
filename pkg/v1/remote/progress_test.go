@@ -1,6 +1,7 @@
 package remote
 
 import (
+	"errors"
 	"fmt"
 	"net/http/httptest"
 	"net/url"
@@ -106,36 +107,33 @@ func TestWrite_Progress_NotExists(t *testing.T) {
 	}
 }
 
-// TODO: WriteIndex calls Write multiple times, which closes o.updates each time, causing panic.
 func TestWriteIndex_Progress_NotExists(t *testing.T) {
-	/*
-		idx, err := random.Index(100000, 10, 10)
-		if err != nil {
-			t.Fatal(err)
-		}
-		c := make(chan v1.Update, 200)
+	idx, err := random.Index(100000, 3, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := make(chan v1.Update, 200)
 
-		// Set up a fake registry.
-		s := httptest.NewServer(registry.New())
-		defer s.Close()
-		u, err := url.Parse(s.URL)
-		if err != nil {
-			t.Fatal(err)
-		}
-		dst := fmt.Sprintf("%s/test/progress/upload", u.Host)
-		ref, err := name.ParseReference(dst)
-		if err != nil {
-			t.Fatal(err)
-		}
+	// Set up a fake registry.
+	s := httptest.NewServer(registry.New())
+	defer s.Close()
+	u, err := url.Parse(s.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst := fmt.Sprintf("%s/test/progress/upload", u.Host)
+	ref, err := name.ParseReference(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-		if err := WriteIndex(ref, idx, WithProgress(c)); err != nil {
-			t.Fatalf("WriteIndex: %v", err)
-		}
+	if err := WriteIndex(ref, idx, WithProgress(c)); err != nil {
+		t.Fatalf("WriteIndex: %v", err)
+	}
 
-		if err := checkUpdates(c); err != nil {
-			t.Fatal(err)
-		}
-	*/
+	if err := checkUpdates(c); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestMultiWrite_Progress(t *testing.T) {
@@ -152,14 +150,18 @@ func TestMultiWrite_Progress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dst := fmt.Sprintf("%s/test/progress/upload", u.Host)
-	ref, err := name.ParseReference(dst)
+	ref, err := name.ParseReference(fmt.Sprintf("%s/test/progress/upload", u.Host))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref2, err := name.ParseReference(fmt.Sprintf("%s/test/progress/upload:again", u.Host))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	if err := MultiWrite(map[name.Reference]Taggable{
-		ref: idx,
+		ref:  idx,
+		ref2: idx,
 	}, WithProgress(c)); err != nil {
 		t.Fatalf("MultiWrite: %v", err)
 	}
@@ -176,6 +178,10 @@ func checkUpdates(updates <-chan v1.Update) error {
 	for u := range updates {
 		if u.Error != nil {
 			return u.Error
+		}
+
+		if u.Total == 0 {
+			return errors.New("saw zero total")
 		}
 
 		if total == 0 {

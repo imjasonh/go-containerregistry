@@ -93,6 +93,15 @@ func Write(ref name.Reference, img v1.Image, options ...Option) error {
 		defer func() { close(o.updates) }()
 	}
 
+	return w.writeImage(ref, img, o)
+}
+
+func (w writer) writeImage(ref name.Reference, img v1.Image, o *options) error {
+	ls, err := img.Layers()
+	if err != nil {
+		return err
+	}
+
 	// Upload individual layers in goroutines and collect any errors.
 	// If we can dedupe by the layer digest, try to do so. If we can't determine
 	// the digest for whatever reason, we can't dedupe and might re-upload.
@@ -475,6 +484,11 @@ func (w *writer) writeIndex(ref name.Reference, ii v1.ImageIndex, options ...Opt
 		return err
 	}
 
+	o, err := makeOptions(ref.Context(), options...)
+	if err != nil {
+		return err
+	}
+
 	// TODO(#803): Pipe through remote.WithJobs and upload these in parallel.
 	for _, desc := range index.Manifests {
 		ref := ref.Context().Digest(desc.Digest.String())
@@ -505,7 +519,7 @@ func (w *writer) writeIndex(ref name.Reference, ii v1.ImageIndex, options ...Opt
 			// TODO: Ideally we could reuse this writer, but we need to know
 			// scopes before we do the token exchange. To be lazy here, just
 			// re-do the token exchange. MultiWrite fixes this.
-			if err := Write(ref, img, options...); err != nil {
+			if err := w.writeImage(ref, img, o); err != nil {
 				return err
 			}
 		default:
@@ -647,7 +661,103 @@ func WriteIndex(ref name.Reference, ii v1.ImageIndex, options ...Option) error {
 		updates: o.updates,
 		last:    &v1.Update{},
 	}
+
+	if o.updates != nil {
+		w.last.Total, err = countIndex(ii)
+		if err != nil {
+			return err
+		}
+
+		defer func() { close(o.updates) }()
+	}
+
 	return w.writeIndex(ref, ii, options...)
+}
+
+// countImage counts the total size of all layers + config blob + manifest for
+// an image. It does not attempt to de-dupe duplicate layers.
+func countImage(img v1.Image) (int64, error) {
+	var total int64
+	ls, err := img.Layers()
+	if err != nil {
+		return 0, err
+	}
+	for _, l := range ls {
+		if _, ok := l.(*stream.Layer); ok {
+			return 0, errors.New("cannot use stream.Layer and WithProgress")
+		}
+		size, err := l.Size()
+		if err != nil {
+			return 0, err
+		}
+		total += size
+	}
+	b, err := img.RawConfigFile()
+	if err != nil {
+		return 0, err
+	}
+	total += int64(len(b))
+	size, err := img.Size()
+	if err != nil {
+		return 0, err
+	}
+	total += size
+	return total, nil
+}
+
+// countIndex counts the total size of all images + sub-indexes for an index.
+// It does not attempt to de-dupe duplicate images, etc.
+func countIndex(idx v1.ImageIndex) (int64, error) {
+	var total int64
+	mf, err := idx.IndexManifest()
+	if err != nil {
+		return 0, err
+	}
+
+	for _, desc := range mf.Manifests {
+		switch desc.MediaType {
+		case types.OCIImageIndex, types.DockerManifestList:
+			sidx, err := idx.ImageIndex(desc.Digest)
+			if err != nil {
+				return 0, err
+			}
+			size, err := countIndex(sidx)
+			if err != nil {
+				return 0, err
+			}
+			total += size
+		case types.OCIManifestSchema1, types.DockerManifestSchema2:
+			simg, err := idx.Image(desc.Digest)
+			if err != nil {
+				return 0, err
+			}
+			size, err := countImage(simg)
+			if err != nil {
+				return 0, err
+			}
+			total += size
+		default:
+			// Workaround for #819.
+			if wl, ok := idx.(withLayer); ok {
+				layer, err := wl.Layer(desc.Digest)
+				if err != nil {
+					return 0, err
+				}
+				size, err := layer.Size()
+				if err != nil {
+					return 0, err
+				}
+				total += size
+			}
+		}
+	}
+
+	size, err := idx.Size()
+	if err != nil {
+		return 0, err
+	}
+	total += size
+	return total, nil
 }
 
 // WriteLayer uploads the provided Layer to the specified repo.
