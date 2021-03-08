@@ -87,12 +87,16 @@ github.com/inconshreveable/mousetrap
 github.com/konsorten/go-windows-terminal-sequences
 # github.com/kr/text v0.2.0
 ## explicit
+# github.com/mattn/go-runewidth v0.0.10
+github.com/mattn/go-runewidth
 # github.com/maxbrunsfeld/counterfeiter/v6 v6.2.2
 ## explicit
 github.com/maxbrunsfeld/counterfeiter/v6
 github.com/maxbrunsfeld/counterfeiter/v6/arguments
 github.com/maxbrunsfeld/counterfeiter/v6/command
 github.com/maxbrunsfeld/counterfeiter/v6/generator
+# github.com/mitchellh/colorstring v0.0.0-20190213212951-d06e56a500db
+github.com/mitchellh/colorstring
 # github.com/morikuni/aec v1.0.0
 ## explicit
 # github.com/niemeyer/pretty v0.0.0-20200227124842-a10e7caefd8e
@@ -109,8 +113,13 @@ github.com/opencontainers/image-spec/specs-go
 github.com/opencontainers/image-spec/specs-go/v1
 # github.com/pkg/errors v0.9.1
 github.com/pkg/errors
+# github.com/rivo/uniseg v0.2.0
+github.com/rivo/uniseg
 # github.com/russross/blackfriday/v2 v2.0.1
 github.com/russross/blackfriday/v2
+# github.com/schollz/progressbar/v3 v3.7.4
+## explicit
+github.com/schollz/progressbar/v3
 # github.com/shurcooL/sanitized_anchor_name v1.0.0
 github.com/shurcooL/sanitized_anchor_name
 # github.com/sirupsen/logrus v1.6.0
@@ -124,6 +133,8 @@ github.com/spf13/cobra/doc
 github.com/spf13/pflag
 # github.com/stretchr/testify v1.6.1
 ## explicit
+# golang.org/x/crypto v0.0.0-20201221181555-eec23a3978ad
+golang.org/x/crypto/ssh/terminal
 # golang.org/x/mod v0.3.0
 golang.org/x/mod/module
 golang.org/x/mod/semver
@@ -142,10 +153,13 @@ golang.org/x/oauth2/jwt
 # golang.org/x/sync v0.0.0-20201207232520-09787c993a3a
 ## explicit
 golang.org/x/sync/errgroup
-# golang.org/x/sys v0.0.0-20200930185726-fdedc70b468f
+# golang.org/x/sys v0.0.0-20210124154548-22da62e12c0c
 golang.org/x/sys/internal/unsafeheader
+golang.org/x/sys/plan9
 golang.org/x/sys/unix
 golang.org/x/sys/windows
+# golang.org/x/term v0.0.0-20201210144234-2321bbc49cbf
+golang.org/x/term
 # golang.org/x/text v0.3.4
 ## explicit
 # golang.org/x/time v0.0.0-20200416051211-89c76fbcd5d1

@@ -23,6 +23,7 @@ require (
 	github.com/onsi/ginkgo v1.12.0 // indirect
 	github.com/onsi/gomega v1.9.0 // indirect
 	github.com/opencontainers/image-spec v1.0.1
+	github.com/schollz/progressbar/v3 v3.7.4
 	github.com/sirupsen/logrus v1.6.0 // indirect
 	github.com/spf13/cobra v1.0.0
 	github.com/stretchr/testify v1.6.1 // indirect

@@ -21,8 +21,10 @@ import (
 	"github.com/google/go-containerregistry/pkg/internal/legacy"
 	"github.com/google/go-containerregistry/pkg/logs"
 	"github.com/google/go-containerregistry/pkg/name"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/types"
+	prog "github.com/schollz/progressbar/v3"
 )
 
 // Copy copies a remote image or index from src to dst.
@@ -77,7 +79,17 @@ func copyImage(desc *remote.Descriptor, dstRef name.Reference, o options) error 
 	if err != nil {
 		return err
 	}
-	return remote.Write(dstRef, img, o.remote...)
+	ch := make(chan v1.Update)
+	go remote.Write(dstRef, img, append(o.remote, remote.WithProgress(ch))...)
+	pg := prog.New(0)
+	for u := range ch {
+		if u.Error != nil {
+			return u.Error
+		}
+		pg.ChangeMax64(u.Total)
+		pg.Set64(u.Complete)
+	}
+	return nil
 }
 
 func copyIndex(desc *remote.Descriptor, dstRef name.Reference, o options) error {
