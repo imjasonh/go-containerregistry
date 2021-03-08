@@ -65,38 +65,21 @@ func Write(ref name.Reference, img v1.Image, options ...Option) error {
 		client:  &http.Client{Transport: tr},
 		context: o.context,
 		updates: o.updates,
-		last:    &v1.Update{},
 	}
 
 	if o.updates != nil {
-		for _, l := range ls {
-			if _, ok := l.(*stream.Layer); ok {
-				return errors.New("cannot use stream.Layer and WithProgress")
-			}
-			size, err := l.Size()
-			if err != nil {
-				return err
-			}
-			w.last.Total += size
-		}
-		b, err := img.RawConfigFile()
+		w.last = &v1.Update{}
+		w.last.Total, err = countImage(img)
 		if err != nil {
 			return err
 		}
-		w.last.Total += int64(len(b))
-		b, err = img.RawManifest()
-		if err != nil {
-			return err
-		}
-		w.last.Total += int64(len(b))
-
 		defer func() { close(o.updates) }()
 	}
 
-	return w.writeImage(ref, img, o)
+	return sendError(o.updates, w.writeImage(ref, img, o.allowNondistributableArtifacts))
 }
 
-func (w writer) writeImage(ref name.Reference, img v1.Image, o *options) error {
+func (w *writer) writeImage(ref name.Reference, img v1.Image, allowNondistributableArtifacts bool) error {
 	ls, err := img.Layers()
 	if err != nil {
 		return err
@@ -115,7 +98,7 @@ func (w writer) writeImage(ref name.Reference, img v1.Image, o *options) error {
 		if err != nil {
 			return err
 		}
-		if !mt.IsDistributable() && !o.allowNondistributableArtifacts {
+		if !mt.IsDistributable() && !allowNondistributableArtifacts {
 			continue
 		}
 
@@ -178,6 +161,13 @@ type writer struct {
 
 	updates chan<- v1.Update
 	last    *v1.Update
+}
+
+func sendError(ch chan<- v1.Update, err error) error {
+	if err != nil && ch != nil {
+		ch <- v1.Update{Error: err}
+	}
+	return err
 }
 
 // url returns a url.Url for the specified path in the context of this remote image reference.
@@ -326,7 +316,6 @@ func (r *progressReader) Close() error {
 // On failure, this will return an error.  On success, this will return the location
 // header indicating how to commit the streamed blob.
 func (w *writer) streamBlob(ctx context.Context, blob io.ReadCloser, streamLocation string) (commitLocation string, err error) {
-
 	if w.updates != nil {
 		blob = &progressReader{rc: blob, updates: w.updates, last: w.last}
 	}
@@ -387,11 +376,6 @@ func (w *writer) updateProgress(written int64) {
 
 // uploadOne performs a complete upload of a single layer.
 func (w *writer) uploadOne(l v1.Layer) error {
-	size, err := l.Size()
-	if err != nil {
-		return err
-	}
-
 	var from, mount string
 	if h, err := l.Digest(); err == nil {
 		// If we know the digest, this isn't a streaming layer. Do an existence
@@ -401,6 +385,10 @@ func (w *writer) uploadOne(l v1.Layer) error {
 			return err
 		}
 		if existing {
+			size, err := l.Size()
+			if err != nil {
+				return err
+			}
 			w.updateProgress(size)
 			logs.Progress.Printf("existing blob: %v", h)
 			return nil
@@ -421,11 +409,15 @@ func (w *writer) uploadOne(l v1.Layer) error {
 		if err != nil {
 			return err
 		} else if mounted {
-			h, err := l.Digest()
+			size, err := l.Size()
 			if err != nil {
 				return err
 			}
 			w.updateProgress(size)
+			h, err := l.Digest()
+			if err != nil {
+				return err
+			}
 			logs.Progress.Printf("mounted blob: %s", h.String())
 			return nil
 		}
@@ -507,7 +499,6 @@ func (w *writer) writeIndex(ref name.Reference, ii v1.ImageIndex, options ...Opt
 			if err != nil {
 				return err
 			}
-
 			if err := w.writeIndex(ref, ii); err != nil {
 				return err
 			}
@@ -516,10 +507,7 @@ func (w *writer) writeIndex(ref name.Reference, ii v1.ImageIndex, options ...Opt
 			if err != nil {
 				return err
 			}
-			// TODO: Ideally we could reuse this writer, but we need to know
-			// scopes before we do the token exchange. To be lazy here, just
-			// re-do the token exchange. MultiWrite fixes this.
-			if err := w.writeImage(ref, img, o); err != nil {
+			if err := w.writeImage(ref, img, o.allowNondistributableArtifacts); err != nil {
 				return err
 			}
 		default:
@@ -616,6 +604,50 @@ func (w *writer) commitManifest(t Taggable, ref name.Reference) error {
 	return nil
 }
 
+func scopesForUploadingIndex(repo name.Repository, idx v1.ImageIndex) []string {
+	// use a map as set to remove duplicates scope strings
+	scopeSet := map[string]struct{}{}
+
+	mf, err := idx.IndexManifest()
+	if err != nil {
+		return nil
+	}
+	for _, desc := range mf.Manifests {
+		switch desc.MediaType {
+		case types.OCIImageIndex, types.DockerManifestList:
+			sidx, err := idx.ImageIndex(desc.Digest)
+			if err != nil {
+				return nil
+			}
+			for _, sc := range scopesForUploadingIndex(repo, sidx) {
+				scopeSet[sc] = struct{}{}
+			}
+		case types.OCIManifestSchema1, types.DockerManifestSchema2:
+			simg, err := idx.Image(desc.Digest)
+			if err != nil {
+				return nil
+			}
+			ls, err := simg.Layers()
+			if err != nil {
+				return nil
+			}
+			for _, sc := range scopesForUploadingImage(repo, ls) {
+				scopeSet[sc] = struct{}{}
+			}
+		}
+	}
+
+	scopes := make([]string, 0)
+	// Push scope should be the first element because a few registries just look at the first scope to determine access.
+	scopes = append(scopes, repo.Scope(transport.PushScope))
+
+	for scope := range scopeSet {
+		scopes = append(scopes, scope)
+	}
+
+	return scopes
+}
+
 func scopesForUploadingImage(repo name.Repository, layers []v1.Layer) []string {
 	// use a map as set to remove duplicates scope strings
 	scopeSet := map[string]struct{}{}
@@ -649,7 +681,7 @@ func WriteIndex(ref name.Reference, ii v1.ImageIndex, options ...Option) error {
 	if err != nil {
 		return err
 	}
-	scopes := []string{ref.Scope(transport.PushScope)}
+	scopes := scopesForUploadingIndex(ref.Context(), ii)
 	tr, err := transport.NewWithContext(o.context, ref.Context().Registry, o.auth, o.transport, scopes)
 	if err != nil {
 		return err
@@ -659,19 +691,18 @@ func WriteIndex(ref name.Reference, ii v1.ImageIndex, options ...Option) error {
 		client:  &http.Client{Transport: tr},
 		context: o.context,
 		updates: o.updates,
-		last:    &v1.Update{},
 	}
 
 	if o.updates != nil {
+		w.last = &v1.Update{}
 		w.last.Total, err = countIndex(ii)
 		if err != nil {
 			return err
 		}
-
 		defer func() { close(o.updates) }()
 	}
 
-	return w.writeIndex(ref, ii, options...)
+	return sendError(o.updates, w.writeIndex(ref, ii, options...))
 }
 
 // countImage counts the total size of all layers + config blob + manifest for
@@ -776,25 +807,22 @@ func WriteLayer(repo name.Repository, layer v1.Layer, options ...Option) error {
 		client:  &http.Client{Transport: tr},
 		context: o.context,
 		updates: o.updates,
-		last:    &v1.Update{},
 	}
 
 	if o.updates != nil {
+		w.last = &v1.Update{}
 		if _, ok := layer.(*stream.Layer); ok {
 			return errors.New("cannot use stream.Layer and WithProgress")
 		}
 		size, err := layer.Size()
-		// TODO publish update too?
 		if err != nil {
 			return err
 		}
 		w.last.Total = size
-		defer func() {
-			close(o.updates)
-		}()
+		defer func() { close(o.updates) }()
 	}
 
-	return w.uploadOne(layer)
+	return sendError(o.updates, w.uploadOne(layer))
 }
 
 // Tag adds a tag to the given Taggable via PUT /v2/.../manifests/<tag>
