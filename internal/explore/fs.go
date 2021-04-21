@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -33,7 +34,7 @@ import (
 const debug = false
 
 // double http.FileServer sniffLen as of go.16
-const bufferLen = 1024
+const bufferLen = 2 << 16
 
 // Implements http.FileSystem.
 type layerFS struct {
@@ -140,7 +141,8 @@ func (fs *layerFS) Open(original string) (http.File, error) {
 		return nil, fmt.Errorf("nope: %s", name)
 	}
 
-	// Assume we're listing the top level, return this thing.
+	// We didn't find the entry in the tarball, so we're probably trying to list
+	// a file or directory that does not exist.
 	return &layerFile{
 		name: name,
 		fs:   fs,
@@ -369,6 +371,34 @@ func (f *layerFile) Readdir(count int) ([]os.FileInfo, error) {
 			fis = append(fis, fi)
 		}
 	}
+
+	// If we don't find anything in here, but there were subdirectories per the tarball
+	// paths, synthesize some directories.
+	if len(fis) == 0 {
+		log.Printf("ReadDir(%q): No matching headers in %d entries, synthesizing directories", f.name, len(f.fs.headers))
+		dirs := map[string]struct{}{}
+		for _, hdr := range f.fs.headers {
+			name := path.Clean("/" + hdr.Name)
+			dir := path.Dir(strings.TrimPrefix(name, prefix))
+			if dir != "" {
+				prev := dir
+				// Walk up to the first directory.
+				for next := prev; next != "." && filepath.ToSlash(next) != "/"; prev, next = next, filepath.Dir(next) {
+					if debug {
+						log.Printf("ReadDir(%q): dir: %q, prev: %q, next: %q", f.name, dir, prev, next)
+					}
+				}
+				dirs[prev] = struct{}{}
+			}
+		}
+		for dir := range dirs {
+			if debug {
+				log.Printf("ReadDir(%q): dir: %q", f.name, dir)
+			}
+			fis = append(fis, fileInfo{dir})
+		}
+	}
+
 	return fis, nil
 }
 
@@ -386,6 +416,13 @@ func (f *layerFile) Stat() (os.FileInfo, error) {
 	}
 	if debug {
 		log.Printf("Stat(%q): nonroot!", f.name)
+	}
+
+	if f.header == nil {
+		log.Printf("Stat(%q): no header!", f.name)
+
+		// This is a non-existent entry in the tarball, we need to synthesize one.
+		return fileInfo{f.name}, nil
 	}
 	return f.header.FileInfo(), nil
 }
@@ -424,7 +461,10 @@ func (f fileInfo) ModTime() time.Time {
 	if debug {
 		log.Printf("%q.ModTime()", f.name)
 	}
-	return time.Now()
+	if f.name == "" || f.name == "/" || f.name == "/index.html" {
+		return time.Now()
+	}
+	return time.Unix(0, 0)
 }
 
 func (f fileInfo) IsDir() bool {
