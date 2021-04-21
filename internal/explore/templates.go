@@ -142,7 +142,9 @@ type HeaderData struct {
 	Descriptor *remote.Descriptor
 }
 
-// Cosign simple signing stuff
+// Cosign simple signing stuff.
+// TODO: Maybe just remove this?
+
 type SimpleSigning struct {
 	Critical Critical
 	Optional map[string]string

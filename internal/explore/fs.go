@@ -33,7 +33,7 @@ import (
 // Lots of debugging that we don't want to compile into the binary.
 const debug = false
 
-// double http.FileServer sniffLen as of go.16
+// More than enough for FileServer to Peek at file contents.
 const bufferLen = 2 << 16
 
 // Implements http.FileSystem.
@@ -206,7 +206,7 @@ func (f *layerFile) Seek(offset int64, whence int) (int64, error) {
 			// Seeking somewhere our cursor has already moved past, we can't respond.
 			// TODO: Reset file somehow?
 			log.Printf("Open(%q).Seek(%d, %d): offset < cursor: ???", f.name, offset, whence)
-			return -1, fmt.Errorf("not implemented")
+			return 0, fmt.Errorf("not implemented")
 		}
 
 		if offset > f.cursor {
@@ -215,7 +215,7 @@ func (f *layerFile) Seek(offset int64, whence int) (int64, error) {
 				// But not past the Peek().
 				n := offset - f.cursor
 				if _, err := f.buf.Discard(int(n)); err != nil {
-					return -1, err
+					return 0, err
 				}
 				f.cursor = f.cursor + n
 				return f.cursor, nil
@@ -224,7 +224,7 @@ func (f *layerFile) Seek(offset int64, whence int) (int64, error) {
 			// We want to go past the Peek().
 			n, err := f.buf.Discard(int(offset - f.cursor))
 			if err != nil {
-				return -1, err
+				return 0, err
 			}
 			f.cursor = f.cursor + int64(n)
 			f.peeked = 0
@@ -233,11 +233,11 @@ func (f *layerFile) Seek(offset int64, whence int) (int64, error) {
 
 		// Is this reachable?
 		log.Printf("Open(%q).Seek(%d, %d): start: ???", f.name, offset, whence)
-		return -1, fmt.Errorf("not implemented")
+		return 0, fmt.Errorf("not implemented")
 	}
 
 	log.Printf("Open(%q).Seek(%d, %d): whence: ???", f.name, offset, whence)
-	return -1, fmt.Errorf("not implemented")
+	return 0, fmt.Errorf("not implemented")
 }
 
 func (f *layerFile) Read(p []byte) (int, error) {
@@ -250,7 +250,7 @@ func (f *layerFile) Read(p []byte) (int, error) {
 		if f.cursor != 0 {
 			// This is a surprise!
 			log.Printf("Read(%q): nil buf, cursor = %d", f.name, f.cursor)
-			return -1, fmt.Errorf("invalid cursor position: %d", f.cursor)
+			return 0, fmt.Errorf("invalid cursor position: %d", f.cursor)
 		}
 
 		if len(p) <= bufferLen {
@@ -269,7 +269,7 @@ func (f *layerFile) Read(p []byte) (int, error) {
 			if f.header.Size >= int64(len(p)) {
 				// This should have worked...
 				log.Printf("Read(%q): f.header.Size = %d", f.name, f.header.Size)
-				return -1, err
+				return 0, err
 			}
 
 		}
@@ -295,7 +295,7 @@ func (f *layerFile) Read(p []byte) (int, error) {
 
 		// We need to throw away some peeked bytes to continue with the read.
 		if _, err := f.buf.Discard(int(f.peeked - f.cursor)); err != nil {
-			return -1, err
+			return 0, err
 		}
 	}
 	n, err := f.buf.Read(p)
