@@ -259,6 +259,7 @@ func (h *handler) renderBlob(w http.ResponseWriter, r *http.Request) error {
 
 	fs, err := h.newLayerFS(r)
 	if err != nil {
+		// TODO: Try to detect if we guessed wrong about /blobs/ vs /manifests/ and redirect?
 		return err
 	}
 	defer fs.Close()
