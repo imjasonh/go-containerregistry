@@ -37,6 +37,18 @@ type handler struct {
 	remote []remote.Option
 }
 
+func (h *handler) remoteOptions(r *http.Request) []remote.Option {
+	ctx := r.Context()
+
+	// TODO: Set timeout.
+	// TODO: User agent.
+
+	opts := []remote.Option{}
+	opts = append(opts, h.remote...)
+	opts = append(opts, remote.WithContext(ctx))
+	return opts
+}
+
 type Option func(h *handler)
 
 func WithRemote(opt []remote.Option) Option {
