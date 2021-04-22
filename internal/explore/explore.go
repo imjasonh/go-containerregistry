@@ -203,9 +203,8 @@ func (h *handler) renderBlobJSON(w http.ResponseWriter, blobRef string) error {
 	}
 	size, err := l.Size()
 	if err != nil {
-		return fmt.Errorf("layer %s size: %v", ref, err)
-	}
-	if size > tooBig {
+		log.Printf("layer %s Size(): %v", ref, err)
+	} else if size > tooBig {
 		return fmt.Errorf("layer %s too big: %d", ref, size)
 	}
 	blob, err := l.Compressed()
@@ -223,7 +222,7 @@ func (h *handler) renderBlobJSON(w http.ResponseWriter, blobRef string) error {
 	}
 
 	// TODO: Can we do this in a streaming way?
-	b, err := ioutil.ReadAll(blob)
+	b, err := ioutil.ReadAll(io.LimitReader(blob, tooBig))
 	if err != nil {
 		return err
 	}
