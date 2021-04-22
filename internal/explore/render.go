@@ -14,7 +14,6 @@
 package explore
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -22,6 +21,7 @@ import (
 	"log"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -81,7 +81,7 @@ func (w *simpleOutputter) Key(k string) {
 
 func (w *simpleOutputter) Value(b []byte) {
 	w.tabf()
-	w.Printf(string(b))
+	w.Printf(html.EscapeString(string(b)))
 	w.unfresh()
 	w.key = false
 }
@@ -224,14 +224,16 @@ func renderRaw(w Outputter, raw *json.RawMessage) error {
 		return renderList(w, raw)
 	case map[string]interface{}:
 		return renderMap(w, vv, raw)
+	case string:
+		vs := v.(string)
+		w.Value([]byte(strconv.Quote(vs)))
+		return nil
 	default:
 		b, err := raw.MarshalJSON()
 		if err != nil {
 			return err
 		}
-		safeBuf := bytes.Buffer{}
-		json.HTMLEscape(&safeBuf, b)
-		w.Value(safeBuf.Bytes())
+		w.Value(b)
 		return nil
 	}
 }
