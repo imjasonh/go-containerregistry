@@ -274,6 +274,12 @@ func renderMap(w Outputter, o map[string]interface{}, raw *json.RawMessage) erro
 		return err
 	}
 
+	// Handle empty maps as {}.
+	if len(rawMap) == 0 {
+		w.Value([]byte("{}"))
+		return nil
+	}
+
 	w.StartMap()
 
 	// Make this a stable order.
@@ -393,6 +399,13 @@ func renderList(w Outputter, raw *json.RawMessage) error {
 	if err := json.Unmarshal(*raw, &rawList); err != nil {
 		return err
 	}
+
+	// Handle empty lists as [].
+	if len(rawList) == 0 {
+		w.Value([]byte("[]"))
+		return nil
+	}
+
 	w.StartArray()
 	for _, v := range rawList {
 		if err := renderRaw(w, &v); err != nil {
