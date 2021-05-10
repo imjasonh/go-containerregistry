@@ -379,11 +379,16 @@ func (f *layerFile) Readdir(count int) ([]os.FileInfo, error) {
 		dirs := map[string]struct{}{}
 		for _, hdr := range f.fs.headers {
 			name := path.Clean("/" + hdr.Name)
+
+			if !strings.HasPrefix(name, prefix) {
+				continue
+			}
+
 			dir := path.Dir(strings.TrimPrefix(name, prefix))
-			if dir != "" {
+			if dir != "" && dir != "." {
 				prev := dir
 				// Walk up to the first directory.
-				for next := prev; next != "." && filepath.ToSlash(next) != "/"; prev, next = next, filepath.Dir(next) {
+				for next := prev; next != "." && next != prefix && filepath.ToSlash(next) != "/"; prev, next = next, filepath.Dir(next) {
 					if debug {
 						log.Printf("ReadDir(%q): dir: %q, prev: %q, next: %q", f.name, dir, prev, next)
 					}
@@ -400,6 +405,17 @@ func (f *layerFile) Readdir(count int) ([]os.FileInfo, error) {
 	}
 
 	return fis, nil
+}
+
+func (f *layerFile) contains(child string) bool {
+	if f.Root() {
+		return true
+	}
+
+	prefix := path.Clean("/" + f.name)
+	child = path.Clean("/" + child)
+
+	return strings.HasPrefix(child, prefix)
 }
 
 func isLink(hdr *tar.Header) bool {
