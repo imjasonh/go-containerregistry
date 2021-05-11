@@ -73,8 +73,11 @@ func New(opts ...Option) http.Handler {
 	h.mux.HandleFunc("/http/", h.fsHandler)
 	h.mux.HandleFunc("/https/", h.fsHandler)
 
-	// Just ungzips and dumps the bytes.
+	// Just dumps the bytes.
 	// Useful for looking at something with the wrong mediaType.
+	h.mux.HandleFunc("/raw/", h.fsHandler)
+
+	// Same as above but un-gzips.
 	h.mux.HandleFunc("/gzip/", h.fsHandler)
 
 	return &h
@@ -254,18 +257,22 @@ func (h *handler) renderBlob(w http.ResponseWriter, r *http.Request) error {
 	log.Printf("%v", r.URL)
 
 	// Bit of a hack for tekton bundles...
-	if strings.HasPrefix(r.URL.Path, "/gzip/") {
+	if strings.HasPrefix(r.URL.Path, "/gzip/") || strings.HasPrefix(r.URL.Path, "/raw/") {
 		blob, _, err := h.fetchBlob(r)
 		if err != nil {
 			return err
 		}
-		zr, err := gzip.UnzipReadCloser(blob)
-		if err != nil {
-			return err
-		}
-		defer zr.Close()
 
-		_, err = io.Copy(w, zr)
+		rc := blob
+		if strings.HasPrefix(r.URL.Path, "/gzip/") {
+			rc, err = gzip.UnzipReadCloser(blob)
+			if err != nil {
+				return err
+			}
+			defer rc.Close()
+		}
+
+		_, err = io.Copy(w, rc)
 		return err
 	}
 
@@ -377,7 +384,7 @@ func munge(ref name.Reference) (name.Reference, error) {
 }
 
 func splitFsURL(p string) (string, string, error) {
-	for _, prefix := range []string{"/fs/", "/https/", "/http/", "/gzip/"} {
+	for _, prefix := range []string{"/fs/", "/https/", "/http/", "/gzip/", "/raw/"} {
 		if strings.HasPrefix(p, prefix) {
 			return strings.TrimPrefix(p, prefix), prefix, nil
 		}
