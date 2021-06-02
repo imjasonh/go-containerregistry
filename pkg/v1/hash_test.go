@@ -16,6 +16,8 @@ package v1
 
 import (
 	"encoding/json"
+	"fmt"
+	"hash/fnv"
 	"strconv"
 	"strings"
 	"testing"
@@ -112,4 +114,30 @@ func TestTextMarshalling(t *testing.T) {
 	if h.String() != g.String() {
 		t.Errorf("mismatched hash: %s != %s", h, g)
 	}
+}
+
+func TestRegisterHasher(t *testing.T) {
+	// sha256 is always registered.
+	if _, err := Hasher("sha256"); err != nil {
+		t.Errorf("Hasher(sha256): %v", err)
+	}
+
+	// An unregistered type returns an error.
+	if _, err := Hasher("fake"); err == nil {
+		t.Error("Hasher(fake); got nil, want error")
+	}
+
+	// Register a new hasher impl and use it.
+	RegisterHasher("fnv128a", fnv.New128a)
+	if _, err := Hasher("fnv128a"); err != nil {
+		t.Errorf("Hasher(fnv128a): %v", err)
+	}
+
+	// Register the hasher again, it should panic.
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Println("Recovered in f", r)
+		}
+	}()
+	RegisterHasher("fnv128a", nil)
 }

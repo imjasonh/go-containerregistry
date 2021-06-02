@@ -25,6 +25,32 @@ import (
 	"strings"
 )
 
+var customHashers = map[string]func() hash.Hash{
+	"sha256": sha256.New,
+}
+
+// RegisterHasher registers a new Hasher implementation by name.
+//
+// By default, only "sha256" is supported, but new hash algorithms can be
+// supported using this method:
+//
+//	func init() {
+//		v1.RegisterHasher("my-hash", myHashFunc)
+//	}
+//
+// And later:
+//
+// 	h, err := v1.NewHash("my-hash:😻🚀📈🤞")
+//
+// If a hash algorithm has already been registered with the same name, this
+// method will panic.
+func RegisterHasher(name string, fn func() hash.Hash) {
+	if _, found := customHashers[name]; found {
+		panic(fmt.Sprintf("hasher already registered for %q", name))
+	}
+	customHashers[name] = fn
+}
+
 // Hash is an unqualified digest of some content, e.g. sha256:deadbeef
 type Hash struct {
 	// Algorithm holds the algorithm used to compute the hash.
@@ -76,12 +102,11 @@ func (h *Hash) UnmarshalText(text []byte) error {
 
 // Hasher returns a hash.Hash for the named algorithm (e.g. "sha256")
 func Hasher(name string) (hash.Hash, error) {
-	switch name {
-	case "sha256":
-		return sha256.New(), nil
-	default:
+	fn, found := customHashers[name]
+	if !found {
 		return nil, fmt.Errorf("unsupported hash: %q", name)
 	}
+	return fn(), nil
 }
 
 func (h *Hash) parse(unquoted string) error {
