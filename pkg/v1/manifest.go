@@ -15,7 +15,11 @@
 package v1
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 
 	"github.com/google/go-containerregistry/pkg/v1/types"
@@ -46,6 +50,39 @@ type Descriptor struct {
 	URLs        []string          `json:"urls,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
 	Platform    *Platform         `json:"platform,omitempty"`
+
+	// WIP: DO NOT MERGE
+	Data string `json:"data,omitempty"`
+}
+
+// ErrNoData is returned by GetData when the descriptor does not include inline data.
+var ErrNoData = errors.New("descriptor does not define inline data")
+
+// GetData returns decoded inlined data in the descriptor, if present.
+func (d Descriptor) GetData() ([]byte, error) {
+	if d.Data == "" {
+		return nil, ErrNoData
+	}
+	if d.Digest.Algorithm != "sha256" {
+		return nil, fmt.Errorf("unknown hash algorithm: %s", d.Digest.Algorithm)
+	}
+
+	b, err := base64.StdEncoding.DecodeString(d.Data)
+	if err != nil {
+		return nil, fmt.Errorf("base64 decoding: %v", err)
+	}
+	// Check the decoded size vs the expected size, before hashing.
+	if size := int64(len(b)); size != d.Size {
+		return nil, fmt.Errorf("mismatched size; got %d, want %d", size, d.Size)
+	}
+	h, _, err := SHA256(bytes.NewReader(b))
+	if err != nil {
+		return nil, err
+	}
+	if h.Hex != d.Digest.Hex {
+		return nil, fmt.Errorf("mismatched digest; got %q, want %q", h.Hex, d.Digest.Hex)
+	}
+	return b, nil
 }
 
 // ParseManifest parses the io.Reader's contents into a Manifest.

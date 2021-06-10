@@ -15,6 +15,7 @@
 package remote
 
 import (
+	"bytes"
 	"io"
 	"io/ioutil"
 	"net/http"
@@ -100,7 +101,7 @@ func (r *remoteImage) RawConfigFile() ([]byte, error) {
 		return nil, err
 	}
 
-	body, err := r.fetchBlob(r.context, m.Config.Digest)
+	body, err := r.fetchBlob(r.context, m.Config)
 	if err != nil {
 		return nil, err
 	}
@@ -141,6 +142,17 @@ func (rl *remoteImageLayer) Compressed() (io.ReadCloser, error) {
 	d, err := partial.BlobDescriptor(rl, rl.digest)
 	if err != nil {
 		return nil, err
+	}
+
+	// If the descriptor includes inline data, just return it.
+	if b, err := d.GetData(); err == v1.ErrNoData {
+		// no inlined data, need to fetch it.
+	} else if err != nil {
+		// failed to get inline data.
+		return nil, err
+	} else {
+		// return inlined data.
+		return ioutil.NopCloser(bytes.NewReader(b)), nil
 	}
 
 	// We don't want to log binary layers -- this can break terminals.

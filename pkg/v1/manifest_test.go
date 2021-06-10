@@ -15,6 +15,11 @@
 package v1
 
 import (
+	"bytes"
+	"crypto/rand"
+	"encoding/base64"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -72,5 +77,74 @@ func TestParseIndexManifest(t *testing.T) {
 
 	if got, err := ParseIndexManifest(strings.NewReader("{")); err == nil {
 		t.Errorf("expected error, got: %v", got)
+	}
+}
+
+func TestDescriptorData(t *testing.T) {
+	// generate a little random data.
+	data := make([]byte, 11)
+	rand.Read(data)
+
+	size := int64(len(data))
+	enc := base64.StdEncoding.EncodeToString(data)
+	h, _, _ := SHA256(bytes.NewReader(data))
+
+	for _, c := range []struct {
+		desc    string
+		d       Descriptor
+		want    []byte
+		wantErr error
+	}{{
+		desc:    "no data",
+		d:       Descriptor{},
+		wantErr: ErrNoData,
+	}, {
+		desc: "good",
+		d: Descriptor{
+			Digest: h,
+			Size:   size,
+			Data:   enc,
+		},
+		want: data,
+	}, {
+		desc: "bad size (too large)",
+		d: Descriptor{
+			Digest: h,
+			Size:   size + 10,
+			Data:   enc,
+		},
+		wantErr: fmt.Errorf("mismatched size; got 11, want 21"),
+	}, {
+		desc: "bad size (too small)",
+		d: Descriptor{
+			Digest: h,
+			Size:   size - 5,
+			Data:   enc,
+		},
+		wantErr: fmt.Errorf("mismatched size; got 11, want 6"),
+	}, {
+		desc: "bad digest",
+		d: Descriptor{
+			Digest: Hash{
+				Algorithm: h.Algorithm,
+				Hex:       h.Hex + "haha",
+			},
+			Size: size,
+			Data: enc,
+		},
+		wantErr: fmt.Errorf("mismatched digest; got %q, want %q", h.Hex, h.Hex+"haha"),
+	}} {
+		t.Run(c.desc, func(t *testing.T) {
+			got, err := c.d.GetData()
+			if (err == nil) != (c.wantErr == nil) {
+				t.Fatalf("unexpected error: got %v, want %v", err, c.wantErr)
+			}
+			if err != nil && c.wantErr != nil && err.Error() != c.wantErr.Error() {
+				t.Fatalf("unexpected error:\n got %v\nwant %v", err, c.wantErr)
+			}
+			if !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("got %q, want %q", string(got), string(c.want))
+			}
+		})
 	}
 }

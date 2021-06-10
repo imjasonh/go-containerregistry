@@ -363,7 +363,18 @@ func (f *fetcher) headManifest(ref name.Reference, acceptable []types.MediaType)
 	}, nil
 }
 
-func (f *fetcher) fetchBlob(ctx context.Context, h v1.Hash) (io.ReadCloser, error) {
+func (f *fetcher) fetchBlob(ctx context.Context, d v1.Descriptor) (io.ReadCloser, error) {
+	if b, err := d.GetData(); err == v1.ErrNoData {
+		// no inlined data, need to fetch it.
+	} else if err != nil {
+		// failed to get inline data.
+		return nil, err
+	} else {
+		// return inlined data.
+		return ioutil.NopCloser(bytes.NewReader(b)), nil
+	}
+
+	h := d.Digest
 	u := f.url("blobs", h.String())
 	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
 	if err != nil {
