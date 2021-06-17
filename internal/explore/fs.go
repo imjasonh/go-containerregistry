@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/go-containerregistry/internal/and"
 	"github.com/google/go-containerregistry/internal/gzip"
 )
 
@@ -43,7 +44,7 @@ type layerFS struct {
 	h   *handler
 
 	ref     string
-	zr      io.ReadCloser
+	rc      io.ReadCloser
 	tr      *tar.Reader
 	headers []*tar.Header
 }
@@ -67,32 +68,40 @@ func (fs *layerFS) reset() error {
 	if err != nil {
 		return err
 	}
-	zr, err := gzip.UnzipReadCloser(blob)
+
+	ok, pr, err := gzip.Peek(blob)
+	var rc io.ReadCloser
+	rc = &and.ReadCloser{pr, blob.Close}
+	if ok {
+		rc, err = gzip.UnzipReadCloser(rc)
+		if err != nil {
+			return err
+		}
+	}
 	if err != nil {
-		return err
+		log.Printf("gzip.Peek(%q) = %v", ref, err)
 	}
 
-	if fs.zr != nil {
-		if err := fs.zr.Close(); err != nil {
-			log.Printf("layerFs(%q).zr.Close() = %v", ref, err)
+	if fs.rc != nil {
+		if err := fs.rc.Close(); err != nil {
+			log.Printf("layerFs(%q).rc.Close() = %v", ref, err)
 		}
 	}
 
-	tr := tar.NewReader(zr)
+	fs.rc = rc
+	fs.tr = tar.NewReader(rc)
 
 	fs.ref = ref
-	fs.zr = zr
-	fs.tr = tr
 	fs.headers = []*tar.Header{}
 
 	return nil
 }
 
 func (fs *layerFS) Close() error {
-	return fs.zr.Close()
+	return fs.rc.Close()
 }
 
-// TODO: Check to see if we hit tr or zr EOF and reset.
+// TODO: Check to see if we hit tr or rc EOF and reset.
 func (fs *layerFS) Open(original string) (http.File, error) {
 	name := strings.TrimPrefix(original, fs.ref)
 

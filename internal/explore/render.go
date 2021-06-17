@@ -362,7 +362,7 @@ func renderMap(w Outputter, o map[string]interface{}, raw *json.RawMessage) erro
 			// Don't fall through to renderRaw.
 			continue
 
-		case "Docker-manifest-digest":
+		case "Docker-manifest-digest", "docker-manifest-digest":
 			h := v1.Hash{}
 			if err := json.Unmarshal(v, &h); err != nil {
 				log.Printf("Unmarshal digest %q: %v", string(v), err)

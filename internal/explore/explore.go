@@ -14,6 +14,8 @@
 package explore
 
 import (
+	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -21,7 +23,9 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
+	"github.com/google/go-containerregistry/internal/and"
 	"github.com/google/go-containerregistry/internal/gzip"
 	"github.com/google/go-containerregistry/internal/verify"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -35,6 +39,9 @@ const tooBig = 2 << 20
 type handler struct {
 	mux    *http.ServeMux
 	remote []remote.Option
+
+	// Stupid hack because I'm too lazy to refactor.
+	blobs map[*http.Request]io.ReadCloser
 }
 
 func (h *handler) remoteOptions(r *http.Request) []remote.Option {
@@ -59,7 +66,8 @@ func WithRemote(opt []remote.Option) Option {
 
 func New(opts ...Option) http.Handler {
 	h := handler{
-		mux: http.NewServeMux(),
+		mux:   http.NewServeMux(),
+		blobs: map[*http.Request]io.ReadCloser{},
 	}
 
 	for _, opt := range opts {
@@ -276,14 +284,43 @@ func (h *handler) renderBlob(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	fs, err := h.newLayerFS(r)
-	if err != nil {
-		// TODO: Try to detect if we guessed wrong about /blobs/ vs /manifests/ and redirect?
-		return err
-	}
-	defer fs.Close()
+	// Determine if this is actually a filesystem thing.
+	blob, ref, err := h.fetchBlob(r)
+	ok, pr, err := gzip.Peek(blob)
+	if ok {
+		log.Printf("it is gzip")
+		rc := &and.ReadCloser{pr, blob.Close}
+		zr, err := gzip.UnzipReadCloser(rc)
+		if err != nil {
+			return err
+		}
+		ok, pr, err = tarPeek(zr)
+		if ok {
+			log.Printf("it is tar")
+			h.blobs[r] = &and.ReadCloser{pr, blob.Close}
 
-	http.FileServer(fs).ServeHTTP(w, r)
+			fs, err := h.newLayerFS(r)
+			if err != nil {
+				// TODO: Try to detect if we guessed wrong about /blobs/ vs /manifests/ and redirect?
+				return err
+			}
+			defer fs.Close()
+
+			http.FileServer(fs).ServeHTTP(w, r)
+			return nil
+		}
+	}
+	if err != nil {
+		log.Printf("render(%q): %v", ref, err)
+	}
+
+	log.Printf("it is neither")
+	sb, ok := blob.(*sizeBlob)
+	if !ok {
+		return fmt.Errorf("render(%q): no size", ref)
+	}
+	seek := &sizeSeeker{pr, sb.size, ref, nil}
+	http.ServeContent(w, r, "", time.Time{}, seek)
 
 	return nil
 }
@@ -309,6 +346,11 @@ func (h *handler) fetchBlob(r *http.Request) (io.ReadCloser, string, error) {
 	ref := strings.Join([]string{chunks[0], digest}, "@")
 	if ref == "" {
 		return nil, "", fmt.Errorf("bad ref: %s", path)
+	}
+
+	if rc, ok := h.blobs[r]; ok {
+		delete(h.blobs, r)
+		return rc, root + ref, err
 	}
 
 	if root == "/http/" || root == "/https/" {
@@ -339,7 +381,8 @@ func (h *handler) fetchBlob(r *http.Request) (io.ReadCloser, string, error) {
 			if err != nil {
 				return nil, "", err
 			}
-			return checked, root + ref, nil
+			sb := &sizeBlob{checked, resp.ContentLength}
+			return sb, root + ref, nil
 		}
 		resp.Body.Close()
 		log.Printf("GET %s failed: %s", u, resp.Status)
@@ -354,11 +397,16 @@ func (h *handler) fetchBlob(r *http.Request) (io.ReadCloser, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
+	size, err := l.Size()
+	if err != nil {
+		return nil, "", err
+	}
 	rc, err := l.Compressed()
 	if err != nil {
 		return nil, "", err
 	}
-	return rc, root + ref, err
+	sb := &sizeBlob{rc, size}
+	return sb, root + ref, err
 }
 
 func getBlobQuery(r *http.Request) (string, bool) {
@@ -391,4 +439,80 @@ func splitFsURL(p string) (string, string, error) {
 	}
 
 	return "", "", fmt.Errorf("unexpected path: %v", p)
+}
+
+// Pretends to implement Seek because ServeContent only cares about checking
+// for the size by calling Seek(0, io.SeekEnd)
+type sizeSeeker struct {
+	rc    io.Reader
+	size  int64
+	debug string
+	buf   *bufio.Reader
+}
+
+func (s *sizeSeeker) Seek(offset int64, whence int) (int64, error) {
+	if offset == 0 && whence == io.SeekEnd {
+		return s.size, nil
+	}
+	if offset == 0 && whence == io.SeekStart {
+		return 0, nil
+	}
+
+	return 0, fmt.Errorf("ServeContent(%q): Seek(%d, %d)", s.debug, offset, whence)
+}
+
+func (s *sizeSeeker) Read(p []byte) (int, error) {
+	// Handle first read.
+	if s.buf == nil {
+		if len(p) <= bufferLen {
+			s.buf = bufio.NewReaderSize(s.rc, bufferLen)
+		} else {
+			s.buf = bufio.NewReaderSize(s.rc, len(p))
+		}
+
+		// Peek to handle the first content sniff.
+		b, err := s.buf.Peek(len(p))
+		if err != nil {
+			if err == io.EOF {
+				return bytes.NewReader(b).Read(p)
+			} else {
+				return 0, err
+			}
+		}
+		return bytes.NewReader(b).Read(p)
+	}
+
+	// TODO: We assume they will always sniff then reset.
+	return s.buf.Read(p)
+}
+
+type sizeBlob struct {
+	io.ReadCloser
+	size int64
+}
+
+func (s *sizeBlob) Size() (int64, error) {
+	return s.size, nil
+}
+
+const (
+	magicGNU, versionGNU     = "ustar ", " \x00"
+	magicUSTAR, versionUSTAR = "ustar\x00", "00"
+)
+
+func tarPeek(r io.Reader) (bool, gzip.PeekReader, error) {
+	pr := bufio.NewReader(r)
+
+	block, err := pr.Peek(512)
+	if err != nil {
+		// https://github.com/google/go-containerregistry/issues/367
+		if err == io.EOF {
+			return false, pr, nil
+		}
+		return false, pr, err
+	}
+
+	magic := string(block[257:][:6])
+	isTar := magic == magicGNU || magic == magicUSTAR
+	return isTar, pr, nil
 }
