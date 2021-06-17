@@ -22,6 +22,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,7 +42,7 @@ type handler struct {
 	remote []remote.Option
 
 	// Stupid hack because I'm too lazy to refactor.
-	blobs map[*http.Request]io.ReadCloser
+	blobs map[*http.Request]*sizeBlob
 }
 
 func (h *handler) remoteOptions(r *http.Request) []remote.Option {
@@ -67,7 +68,7 @@ func WithRemote(opt []remote.Option) Option {
 func New(opts ...Option) http.Handler {
 	h := handler{
 		mux:   http.NewServeMux(),
-		blobs: map[*http.Request]io.ReadCloser{},
+		blobs: map[*http.Request]*sizeBlob{},
 	}
 
 	for _, opt := range opts {
@@ -84,6 +85,12 @@ func New(opts ...Option) http.Handler {
 	// Just dumps the bytes.
 	// Useful for looking at something with the wrong mediaType.
 	h.mux.HandleFunc("/raw/", h.fsHandler)
+
+	// Try to detect mediaType.
+	h.mux.HandleFunc("/blob/", h.fsHandler)
+
+	// We know it's JSON.
+	h.mux.HandleFunc("/json/", h.fsHandler)
 
 	// Same as above but un-gzips.
 	h.mux.HandleFunc("/gzip/", h.fsHandler)
@@ -117,8 +124,9 @@ func (h *handler) renderResponse(w http.ResponseWriter, r *http.Request) error {
 	if images, ok := qs["image"]; ok {
 		return h.renderManifest(w, r, images[0])
 	}
+	// We shouldn't hit this anymore, but keep these around for backward compat.
 	if blob, ok := getBlobQuery(r); ok {
-		return h.renderBlobJSON(w, blob)
+		return h.renderBlobJSON(w, r, blob)
 	}
 	if repos, ok := qs["repo"]; ok {
 		return h.renderRepo(w, r, repos[0])
@@ -214,25 +222,51 @@ func (h *handler) renderManifest(w http.ResponseWriter, r *http.Request, image s
 }
 
 // Render blob as JSON, possibly containing refs to images.
-func (h *handler) renderBlobJSON(w http.ResponseWriter, blobRef string) error {
-	ref, err := name.NewDigest(blobRef, name.StrictValidation)
-	if err != nil {
-		return err
-	}
+func (h *handler) renderBlobJSON(w http.ResponseWriter, r *http.Request, blobRef string) error {
+	var (
+		size int64
+		blob io.ReadCloser
+		err  error
+		ref  name.Reference
+	)
+	if blobRef != "" {
+		dig, err := name.NewDigest(blobRef, name.StrictValidation)
+		if err != nil {
+			return err
+		}
+		ref = dig
 
-	l, err := remote.Layer(ref, h.remote...)
-	if err != nil {
-		return err
-	}
-	size, err := l.Size()
-	if err != nil {
-		log.Printf("layer %s Size(): %v", ref, err)
-	} else if size > tooBig {
-		return fmt.Errorf("layer %s too big: %d", ref, size)
-	}
-	blob, err := l.Compressed()
-	if err != nil {
-		return err
+		l, err := remote.Layer(dig, h.remote...)
+		if err != nil {
+			return err
+		}
+		size, err = l.Size()
+		if err != nil {
+			log.Printf("layer %s Size(): %v", ref, err)
+		} else if size > tooBig {
+			return fmt.Errorf("layer %s too big: %d", ref, size)
+		}
+		blob, err = l.Compressed()
+		if err != nil {
+			return err
+		}
+	} else {
+		fetched, prefix, err := h.fetchBlob(r)
+		if err != nil {
+			return err
+		}
+		_, root, err := splitFsURL(r.URL.Path)
+		if err != nil {
+			return err
+		}
+		trimmed := strings.TrimPrefix(prefix, root)
+		ref, err = name.NewDigest(trimmed, name.StrictValidation)
+		if err != nil {
+			return err
+		}
+
+		blob = fetched
+		size = fetched.size
 	}
 	defer blob.Close()
 
@@ -264,6 +298,10 @@ func (h *handler) renderBlobJSON(w http.ResponseWriter, blobRef string) error {
 func (h *handler) renderBlob(w http.ResponseWriter, r *http.Request) error {
 	log.Printf("%v", r.URL)
 
+	if strings.HasPrefix(r.URL.Path, "/json/") {
+		return h.renderBlobJSON(w, r, "")
+	}
+
 	// Bit of a hack for tekton bundles...
 	if strings.HasPrefix(r.URL.Path, "/gzip/") || strings.HasPrefix(r.URL.Path, "/raw/") {
 		blob, _, err := h.fetchBlob(r)
@@ -271,7 +309,7 @@ func (h *handler) renderBlob(w http.ResponseWriter, r *http.Request) error {
 			return err
 		}
 
-		rc := blob
+		var rc io.ReadCloser = blob
 		if strings.HasPrefix(r.URL.Path, "/gzip/") {
 			rc, err = gzip.UnzipReadCloser(blob)
 			if err != nil {
@@ -289,6 +327,7 @@ func (h *handler) renderBlob(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	size := blob.size
 	ok, pr, err := gzip.Peek(blob)
 	if ok {
 		log.Printf("it is gzip")
@@ -300,7 +339,7 @@ func (h *handler) renderBlob(w http.ResponseWriter, r *http.Request) error {
 		ok, pr, err = tarPeek(zr)
 		if ok {
 			log.Printf("it is tar")
-			h.blobs[r] = &and.ReadCloser{pr, blob.Close}
+			h.blobs[r] = &sizeBlob{&and.ReadCloser{pr, blob.Close}, size}
 
 			fs, err := h.newLayerFS(r)
 			if err != nil {
@@ -317,22 +356,42 @@ func (h *handler) renderBlob(w http.ResponseWriter, r *http.Request) error {
 		log.Printf("render(%q): %v", ref, err)
 	}
 
-	log.Printf("it is neither")
-	sb, ok := blob.(*sizeBlob)
-	if !ok {
-		return fmt.Errorf("render(%q): no size", ref)
+	qs := r.URL.Query()
+	mt := qs.Get("mt")
+	if mt != "" {
+		w.Header().Set("Content-Type", mt)
 	}
-	seek := &sizeSeeker{pr, sb.size, ref, nil}
+	qsize := qs.Get("size")
+	if qsize != "" {
+		if sz, err := strconv.ParseInt(qsize, 10, 64); err != nil {
+			log.Printf("wtf? %q size=%q", ref, qsize)
+		} else {
+			size = sz
+		}
+	}
+
+	log.Printf("it is neither")
+	seek := &sizeSeeker{pr, size, ref, nil}
 	http.ServeContent(w, r, "", time.Time{}, seek)
 
 	return nil
 }
 
 // Fetch blob from registry or URL.
-func (h *handler) fetchBlob(r *http.Request) (io.ReadCloser, string, error) {
+func (h *handler) fetchBlob(r *http.Request) (*sizeBlob, string, error) {
 	path, root, err := splitFsURL(r.URL.Path)
 	if err != nil {
 		return nil, "", err
+	}
+
+	expectedSize := int64(0)
+	qsize := r.URL.Query().Get("size")
+	if qsize != "" {
+		if sz, err := strconv.ParseInt(qsize, 10, 64); err != nil {
+			log.Printf("wtf? %q size=%q", path, qsize)
+		} else {
+			expectedSize = sz
+		}
 	}
 
 	chunks := strings.Split(path, "@")
@@ -384,7 +443,15 @@ func (h *handler) fetchBlob(r *http.Request) (io.ReadCloser, string, error) {
 			if err != nil {
 				return nil, "", err
 			}
-			sb := &sizeBlob{checked, resp.ContentLength}
+			size := expectedSize
+			if size != 0 {
+				if got := resp.ContentLength; got != -1 && got != size {
+					log.Printf("GET %s unexpected size: got %d, want %d", u, got, expectedSize)
+				}
+			} else {
+				size = resp.ContentLength
+			}
+			sb := &sizeBlob{checked, size}
 			return sb, root + ref, nil
 		}
 		resp.Body.Close()
@@ -400,9 +467,12 @@ func (h *handler) fetchBlob(r *http.Request) (io.ReadCloser, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	size, err := l.Size()
-	if err != nil {
-		return nil, "", err
+	size := expectedSize
+	if size == 0 {
+		size, err = l.Size()
+		if err != nil {
+			return nil, "", err
+		}
 	}
 	rc, err := l.Compressed()
 	if err != nil {
@@ -435,7 +505,7 @@ func munge(ref name.Reference) (name.Reference, error) {
 }
 
 func splitFsURL(p string) (string, string, error) {
-	for _, prefix := range []string{"/fs/", "/https/", "/http/", "/gzip/", "/raw/"} {
+	for _, prefix := range []string{"/fs/", "/https/", "/http/", "/gzip/", "/raw/", "/blob/", "/json/"} {
 		if strings.HasPrefix(p, prefix) {
 			return strings.TrimPrefix(p, prefix), prefix, nil
 		}

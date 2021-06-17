@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/types"
 )
@@ -42,7 +43,8 @@ type Outputter interface {
 	EndArray()
 	Doc(url string, mt types.MediaType)
 	URL(handler string, path, original string, h v1.Hash)
-	Linkify(handler string, h v1.Hash)
+	Linkify(mt string, h v1.Hash, size int64)
+	LinkImage(ref string)
 }
 
 type simpleOutputter struct {
@@ -66,9 +68,24 @@ func (w *simpleOutputter) URL(handler string, path, original string, digest v1.H
 	w.key = false
 }
 
-func (w *simpleOutputter) Linkify(handler string, digest v1.Hash) {
+func (w *simpleOutputter) Linkify(mt string, digest v1.Hash, size int64) {
 	w.tabf()
-	w.Printf(`"<a href="%s%s@%s">%s</a>"`, handler, w.repo, digest.String(), html.EscapeString(digest.String()))
+	qs := "?"
+	handler := handlerForMT(mt)
+	if strings.Contains(handler, "?") {
+		qs = "&"
+	}
+	if size != 0 {
+		w.Printf(`"<a href="/%s%s@%s%smt=%s&size=%d">%s</a>"`, handler, w.repo, digest.String(), qs, mt, size, html.EscapeString(digest.String()))
+	}
+	w.Printf(`"<a href="/%s%s@%s%smt=%s">%s</a>"`, handler, w.repo, digest.String(), qs, mt, html.EscapeString(digest.String()))
+	w.unfresh()
+	w.key = false
+}
+
+func (w *simpleOutputter) LinkImage(ref string) {
+	w.tabf()
+	w.Printf(`"<a href="/?image=%s">%s</a>"`, url.PathEscape(ref), html.EscapeString(ref))
 	w.unfresh()
 	w.key = false
 }
@@ -303,7 +320,13 @@ func renderMap(w Outputter, o map[string]interface{}, raw *json.RawMessage) erro
 					if err := json.Unmarshal(v, &h); err != nil {
 						log.Printf("Unmarshal digest %q: %v", string(v), err)
 					} else {
-						w.Linkify("/"+handlerForMT(s), h)
+						size := int64(0)
+						if sz, ok := o["size"]; ok {
+							if sz, ok := sz.(int64); ok {
+								size = sz
+							}
+						}
+						w.Linkify(s, h, size)
 
 						// Don't fall through to renderRaw.
 						continue
@@ -362,13 +385,28 @@ func renderMap(w Outputter, o map[string]interface{}, raw *json.RawMessage) erro
 			// Don't fall through to renderRaw.
 			continue
 
+		case "Docker-reference", "docker-reference":
+			if js, ok := o[k]; ok {
+				if s, ok := js.(string); ok {
+					ref, err := name.ParseReference(s)
+					if err != nil {
+						log.Printf("Parse[%q](%q): %v", k, ref, err)
+					} else {
+						w.LinkImage(ref.String())
+
+						// Don't fall through to renderRaw.
+						continue
+					}
+				}
+			}
+
 		case "Docker-manifest-digest", "docker-manifest-digest":
 			h := v1.Hash{}
 			if err := json.Unmarshal(v, &h); err != nil {
 				log.Printf("Unmarshal digest %q: %v", string(v), err)
 			} else {
 				// TODO: This could maybe be better but we don't have a MT.
-				w.Linkify("/"+handlerForMT(cosignPointee), h)
+				w.Linkify(cosignPointee, h, 0)
 
 				// Don't fall through to renderRaw.
 				continue
@@ -378,7 +416,7 @@ func renderMap(w Outputter, o map[string]interface{}, raw *json.RawMessage) erro
 			if err := json.Unmarshal(v, &h); err != nil {
 				log.Printf("Unmarshal digest %q: %v", string(v), err)
 			} else {
-				w.Linkify("/"+handlerForMT(""), h)
+				w.Linkify(string(types.DockerLayer), h, 0)
 
 				// Don't fall through to renderRaw.
 				continue
@@ -429,22 +467,18 @@ func handlerForMT(s string) string {
 		return `?image=`
 	}
 	switch mt {
-	case types.OCIConfigJSON, types.DockerConfigJSON:
-		return `?config=`
 	case types.OCILayer, types.OCIUncompressedLayer, types.DockerLayer, types.DockerUncompressedLayer:
 		return `fs/`
-	case types.OCIContentDescriptor:
-		return `?descriptor=`
+	case types.OCIContentDescriptor, CosignMediaType, types.OCIConfigJSON, types.DockerConfigJSON:
+		return `json/`
 	case cosignPointee:
 		return `?discovery=true&image=`
-	case CosignMediaType:
-		return `?cosign=`
 	}
 	if strings.HasSuffix(s, "+json") {
-		return `?config=`
+		return `json/`
 	}
 
-	return `fs/`
+	return `blob/`
 }
 
 func getLink(s string) string {
