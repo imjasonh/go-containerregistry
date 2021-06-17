@@ -286,6 +286,9 @@ func (h *handler) renderBlob(w http.ResponseWriter, r *http.Request) error {
 
 	// Determine if this is actually a filesystem thing.
 	blob, ref, err := h.fetchBlob(r)
+	if err != nil {
+		return err
+	}
 	ok, pr, err := gzip.Peek(blob)
 	if ok {
 		log.Printf("it is gzip")
