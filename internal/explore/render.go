@@ -473,6 +473,8 @@ func handlerForMT(s string) string {
 		return `json/`
 	case cosignPointee:
 		return `?discovery=true&image=`
+	case types.DockerManifestSchema1, types.DockerManifestSchema1Signed:
+		return `?image=`
 	}
 	if strings.HasSuffix(s, "+json") {
 		return `json/`
