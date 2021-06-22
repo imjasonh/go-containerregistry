@@ -71,15 +71,15 @@ func (fs *layerFS) reset() error {
 
 	ok, pr, err := gzip.Peek(blob)
 	var rc io.ReadCloser
-	rc = &and.ReadCloser{pr, blob.Close}
+	rc = &and.ReadCloser{Reader: pr, CloseFunc: blob.Close}
+	if err != nil {
+		log.Printf("gzip.Peek(%q) = %v", ref, err)
+	}
 	if ok {
 		rc, err = gzip.UnzipReadCloser(rc)
 		if err != nil {
 			return err
 		}
-	}
-	if err != nil {
-		log.Printf("gzip.Peek(%q) = %v", ref, err)
 	}
 
 	if fs.rc != nil {
@@ -273,24 +273,27 @@ func (f *layerFile) Read(p []byte) (int, error) {
 		b, err := f.buf.Peek(len(p))
 		if debug {
 			log.Printf("Read(%q): Peek(%d): (%d, %v)", f.name, len(p), len(b), err)
+			log.Printf("%s", string(b))
 		}
-		if err != nil {
-			if f.header.Size >= int64(len(p)) {
-				// This should have worked...
-				log.Printf("Read(%q): f.header.Size = %d", f.name, f.header.Size)
-				return 0, err
-			}
 
-		}
 		f.peeked = f.cursor + int64(len(b))
 
 		if err == io.EOF {
+			if debug {
+				log.Printf("hit EOF")
+			}
 			return bytes.NewReader(b).Read(p)
+		} else if err != nil {
+			if f.header.Size >= int64(len(p)) {
+				// This should have worked...
+				log.Printf("Read(%q): f.header.Size = %d, err: %v", f.name, f.header.Size, err)
+			}
+			return 0, err
 		}
 
 		n, err := bytes.NewReader(b).Read(p)
 		if debug {
-			log.Printf("Read(%q) (Peek(%d)) = (%d, %v)", f.name, len(p), n, err)
+			log.Printf("Read(%q): (Peek(%d)) = (%d, %v)", f.name, len(p), n, err)
 		}
 		return n, err
 	}
@@ -298,18 +301,30 @@ func (f *layerFile) Read(p []byte) (int, error) {
 	// We did a Peek() but didn't get a Seek() to reset.
 	if f.peeked != 0 {
 		if f.peeked == f.header.Size {
+			if debug {
+				log.Printf("Read(%q): f.peeked=%d, f.header.size=%d", f.name, f.peeked, f.header.Size)
+			}
 			// We hit EOF.
 			return 0, io.EOF
 		}
 
+		if debug {
+			log.Printf("Read(%q): f.peeked=%d, f.cursor=%d, f.header.size=%d, discarding rest", f.name, f.peeked, f.cursor, f.header.Size)
+		}
 		// We need to throw away some peeked bytes to continue with the read.
 		if _, err := f.buf.Discard(int(f.peeked - f.cursor)); err != nil {
+			if debug {
+				log.Printf("Read(%q): discard err: %v", f.name, err)
+			}
 			return 0, err
 		}
+		// Reset peeked to zero so we know we don't have to discard anymore.
+		f.peeked = 0
 	}
 	n, err := f.buf.Read(p)
 	if debug {
 		log.Printf("Read(%q) = (%d, %v)", f.name, n, err)
+		log.Printf("%s", string(p))
 	}
 	return n, err
 }

@@ -331,7 +331,7 @@ func (h *handler) renderBlob(w http.ResponseWriter, r *http.Request) error {
 	ok, pr, err := gzip.Peek(blob)
 	if ok {
 		log.Printf("it is gzip")
-		rc := &and.ReadCloser{pr, blob.Close}
+		rc := &and.ReadCloser{Reader: pr, CloseFunc: blob.Close}
 		zr, err := gzip.UnzipReadCloser(rc)
 		if err != nil {
 			return err
@@ -339,7 +339,7 @@ func (h *handler) renderBlob(w http.ResponseWriter, r *http.Request) error {
 		ok, pr, err = tarPeek(zr)
 		if ok {
 			log.Printf("it is tar")
-			h.blobs[r] = &sizeBlob{&and.ReadCloser{pr, blob.Close}, size}
+			h.blobs[r] = &sizeBlob{&and.ReadCloser{Reader: pr, CloseFunc: zr.Close}, size}
 
 			fs, err := h.newLayerFS(r)
 			if err != nil {
@@ -524,6 +524,9 @@ type sizeSeeker struct {
 }
 
 func (s *sizeSeeker) Seek(offset int64, whence int) (int64, error) {
+	if debug {
+		log.Printf("sizeSeeker.Seek(%d, %d)", offset, whence)
+	}
 	if offset == 0 && whence == io.SeekEnd {
 		return s.size, nil
 	}
@@ -535,6 +538,9 @@ func (s *sizeSeeker) Seek(offset int64, whence int) (int64, error) {
 }
 
 func (s *sizeSeeker) Read(p []byte) (int, error) {
+	if debug {
+		log.Printf("sizeSeeker.Read(%d)", len(p))
+	}
 	// Handle first read.
 	if s.buf == nil {
 		if len(p) <= bufferLen {
@@ -565,6 +571,9 @@ type sizeBlob struct {
 }
 
 func (s *sizeBlob) Size() (int64, error) {
+	if debug {
+		log.Printf("sizeBlob.Size()")
+	}
 	return s.size, nil
 }
 
