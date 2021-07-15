@@ -44,7 +44,7 @@ type Outputter interface {
 	Doc(url string, mt types.MediaType)
 	URL(handler string, path, original string, h v1.Hash)
 	Linkify(mt string, h v1.Hash, size int64)
-	LinkImage(ref string)
+	LinkImage(ref, text string)
 }
 
 type simpleOutputter struct {
@@ -83,9 +83,9 @@ func (w *simpleOutputter) Linkify(mt string, digest v1.Hash, size int64) {
 	w.key = false
 }
 
-func (w *simpleOutputter) LinkImage(ref string) {
+func (w *simpleOutputter) LinkImage(ref, text string) {
 	w.tabf()
-	w.Printf(`"<a href="/?image=%s">%s</a>"`, url.PathEscape(ref), html.EscapeString(ref))
+	w.Printf(`"<a href="/?image=%s">%s</a>"`, url.PathEscape(ref), html.EscapeString(text))
 	w.unfresh()
 	w.key = false
 }
@@ -385,14 +385,14 @@ func renderMap(w Outputter, o map[string]interface{}, raw *json.RawMessage) erro
 			// Don't fall through to renderRaw.
 			continue
 
-		case "Docker-reference", "docker-reference":
+		case "Docker-reference", "docker-reference", "org.opencontainers.image.base.name":
 			if js, ok := o[k]; ok {
 				if s, ok := js.(string); ok {
 					ref, err := name.ParseReference(s)
 					if err != nil {
 						log.Printf("Parse[%q](%q): %v", k, ref, err)
 					} else {
-						w.LinkImage(ref.String())
+						w.LinkImage(ref.String(), ref.String())
 
 						// Don't fall through to renderRaw.
 						continue
@@ -420,6 +420,25 @@ func renderMap(w Outputter, o map[string]interface{}, raw *json.RawMessage) erro
 
 				// Don't fall through to renderRaw.
 				continue
+			}
+		case "org.opencontainers.image.base.digest":
+			h := v1.Hash{}
+			if err := json.Unmarshal(v, &h); err != nil {
+				log.Printf("Unmarshal digest %q: %v", string(v), err)
+			} else {
+				if mt, ok := o["org.opencontainers.image.base.name"]; ok {
+					if s, ok := mt.(string); ok {
+						base, err := name.ParseReference(s)
+						if err != nil {
+							log.Printf("Parse[%q](%q): %v", k, base, err)
+						} else {
+							w.LinkImage(base.Context().Digest(h.String()).String(), h.String())
+
+							// Don't fall through to renderRaw.
+							continue
+						}
+					}
+				}
 			}
 		}
 
