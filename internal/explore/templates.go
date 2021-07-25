@@ -108,6 +108,13 @@ body {
 .indent {
   margin-left: 2em;
 }
+
+.after::after {
+  content: "(" attr(data-after) ")";
+  padding-left: 5px;
+  font-style: italic;
+  opacity: 50%%;
+}
 </style>
 </head>
 `
@@ -119,6 +126,7 @@ body {
 Docker-Content-Digest: {{.Descriptor.Digest}}<br>
 Content-Length: {{.Descriptor.Size}}<br>
 Content-Type: {{.Descriptor.MediaType}}<br>
+{{ if .TotalSize }}Total Layer Size: <span class="after" data-after="{{ .TotalSizeHuman }}">{{ .TotalSize }}</span><br>{{ end }}
 </div>
 <hr>
 `
@@ -135,11 +143,13 @@ type RepositoryData struct {
 }
 
 type HeaderData struct {
-	Repo       string
-	Image      string
-	CosignTag  string
-	Reference  name.Reference
-	Descriptor *remote.Descriptor
+	Repo           string
+	Image          string
+	CosignTag      string
+	Reference      name.Reference
+	Descriptor     *remote.Descriptor
+	TotalSize      int64
+	TotalSizeHuman string
 }
 
 // Cosign simple signing stuff.

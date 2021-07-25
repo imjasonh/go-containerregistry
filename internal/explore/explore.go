@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dustin/go-humanize"
 	"github.com/google/go-containerregistry/internal/and"
 	"github.com/google/go-containerregistry/internal/gzip"
 	"github.com/google/go-containerregistry/internal/verify"
@@ -198,6 +199,20 @@ func (h *handler) renderManifest(w http.ResponseWriter, r *http.Request, image s
 		} else {
 			data.CosignTag = cosignRef.Identifier()
 		}
+	}
+
+	if desc.MediaType.IsImage() {
+		img, _ := desc.Image()
+		ls, _ := img.Layers()
+		var total int64
+		for _, l := range ls {
+			sz, _ := l.Size()
+			total += sz
+		}
+		rcfg, _ := img.RawConfigFile()
+		total += int64(len(rcfg))
+		data.TotalSize = total
+		data.TotalSizeHuman = humanize.Bytes(uint64(total))
 	}
 
 	fmt.Fprintf(w, header)
@@ -439,7 +454,7 @@ func (h *handler) fetchBlob(r *http.Request) (*sizeBlob, string, error) {
 			if err != nil {
 				return nil, "", err
 			}
-			checked, err := verify.ReadCloser(resp.Body, h)
+			checked, err := verify.ReadCloser(resp.Body, -1, h)
 			if err != nil {
 				return nil, "", err
 			}

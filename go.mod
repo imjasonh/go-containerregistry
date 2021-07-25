@@ -12,6 +12,7 @@ require (
 	github.com/docker/docker v20.10.7+incompatible
 	github.com/docker/docker-credential-helpers v0.6.3 // indirect
 	github.com/docker/go-connections v0.4.0 // indirect
+	github.com/dustin/go-humanize v1.0.0
 	github.com/google/go-cmp v0.5.6
 	github.com/gorilla/mux v1.7.3 // indirect
 	github.com/klauspost/compress v1.13.0 // indirect

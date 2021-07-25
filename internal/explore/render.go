@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/dustin/go-humanize"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/types"
@@ -45,6 +46,7 @@ type Outputter interface {
 	URL(handler string, path, original string, h v1.Hash)
 	Linkify(mt string, h v1.Hash, size int64)
 	LinkImage(ref, text string)
+	SizeValue(uint64)
 }
 
 type simpleOutputter struct {
@@ -99,6 +101,14 @@ func (w *simpleOutputter) Key(k string) {
 func (w *simpleOutputter) Value(b []byte) {
 	w.tabf()
 	w.Printf(html.EscapeString(string(b)))
+	w.unfresh()
+	w.key = false
+}
+
+func (w *simpleOutputter) SizeValue(size uint64) {
+	w.tabf()
+	human := humanize.Bytes(size)
+	w.Printf(`"<span class="after" data-after="%s">%d</span>"`, human, size)
 	w.unfresh()
 	w.key = false
 }
@@ -440,6 +450,16 @@ func renderMap(w Outputter, o map[string]interface{}, raw *json.RawMessage) erro
 					}
 				}
 			}
+		case "size":
+			var sz uint64
+			if err := json.Unmarshal(v, &sz); err != nil {
+				log.Printf("Unmarshal size %q: %v", string(v), err)
+			} else {
+				w.SizeValue(sz)
+			}
+
+			// Don't fall through to renderRaw.
+			continue
 		}
 
 		if err := renderRaw(w, &v); err != nil {
