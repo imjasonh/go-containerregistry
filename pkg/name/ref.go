@@ -38,6 +38,9 @@ type Reference interface {
 
 // ParseReference parses the string as a reference, either by tag or digest.
 func ParseReference(s string, opts ...Option) (Reference, error) {
+	if dt, err := NewDigestTag(s, opts...); err == nil {
+		return dt, nil
+	}
 	if t, err := NewTag(s, opts...); err == nil {
 		return t, nil
 	}
