@@ -15,6 +15,7 @@
 package name
 
 import (
+	"errors"
 	"strings"
 )
 
@@ -83,7 +84,6 @@ func NewDigestTag(name string, opts ...Option) (DigestTag, error) {
 	if len(parts) != 2 {
 		return DigestTag{}, NewErrBadName("a digest must contain exactly one '@' separator (e.g. registry/repository@digest) saw: %s", name)
 	}
-	base := parts[0]
 	digest := parts[1]
 
 	// Always check that the digest is valid.
@@ -91,9 +91,17 @@ func NewDigestTag(name string, opts ...Option) (DigestTag, error) {
 		return DigestTag{}, err
 	}
 
-	tag, err := NewTag(base, opts...)
-	if err == nil {
-		base = tag.Repository.Name()
+	// Split on ":"
+	var tag string
+	parts = strings.Split(parts[0], tagDelim)
+	base := parts[0]
+	// Verify that we aren't confusing a tag for a hostname w/ port for the purposes of weak validation.
+	if len(parts) > 1 && !strings.Contains(parts[len(parts)-1], regRepoDelimiter) {
+		base = strings.Join(parts[:len(parts)-1], tagDelim)
+		tag = parts[len(parts)-1]
+	}
+	if tag == "" {
+		return DigestTag{}, errors.New("tag is required")
 	}
 
 	repo, err := NewRepository(base, opts...)
@@ -103,7 +111,7 @@ func NewDigestTag(name string, opts ...Option) (DigestTag, error) {
 	return DigestTag{
 		Repository: repo,
 		digest:     digest,
-		tag:        tag.TagStr(),
+		tag:        tag,
 		original:   name,
 	}, nil
 }
