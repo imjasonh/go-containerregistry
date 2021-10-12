@@ -46,10 +46,7 @@ func isBlob(req *http.Request) bool {
 
 // blobs
 type blobs struct {
-	// Blobs are content addresses. we store them globally underneath their sha and make no distinctions per image.
-	contents map[string][]byte
-	// Each upload gets a unique id that writes occur to until finalized.
-	uploads map[string][]byte
+	storage Storage
 	lock    sync.Mutex
 }
 
@@ -75,8 +72,8 @@ func (b *blobs) handle(resp http.ResponseWriter, req *http.Request) *regError {
 	if req.Method == "HEAD" {
 		b.lock.Lock()
 		defer b.lock.Unlock()
-		b, ok := b.contents[target]
-		if !ok {
+		b, err := b.storage.GetBlob(target)
+		if err != nil {
 			return &regError{
 				Status:  http.StatusNotFound,
 				Code:    "BLOB_UNKNOWN",
@@ -93,8 +90,8 @@ func (b *blobs) handle(resp http.ResponseWriter, req *http.Request) *regError {
 	if req.Method == "GET" {
 		b.lock.Lock()
 		defer b.lock.Unlock()
-		b, ok := b.contents[target]
-		if !ok {
+		b, err := b.storage.GetBlob(target)
+		if err != nil {
 			return &regError{
 				Status:  http.StatusNotFound,
 				Code:    "BLOB_UNKNOWN",
@@ -124,7 +121,13 @@ func (b *blobs) handle(resp http.ResponseWriter, req *http.Request) *regError {
 
 		b.lock.Lock()
 		defer b.lock.Unlock()
-		b.contents[d] = l.Bytes()
+		if err := b.storage.PutBlob(d, l.Bytes()); err != nil {
+			return &regError{
+				Status:  http.StatusInternalServerError,
+				Code:    "INTERNAL_ERROR",
+				Message: err.Error(),
+			}
+		}
 		resp.Header().Set("Docker-Content-Digest", d)
 		resp.WriteHeader(http.StatusCreated)
 		return nil
@@ -149,18 +152,32 @@ func (b *blobs) handle(resp http.ResponseWriter, req *http.Request) *regError {
 		}
 		b.lock.Lock()
 		defer b.lock.Unlock()
-		if start != len(b.uploads[target]) {
+		sz, err := b.storage.UploadSize(target)
+		if err != nil {
+			return &regError{
+				Status:  http.StatusInternalServerError,
+				Code:    "INTERNAL_ERROR",
+				Message: err.Error(),
+			}
+		}
+		if start != sz {
 			return &regError{
 				Status:  http.StatusRequestedRangeNotSatisfiable,
 				Code:    "BLOB_UPLOAD_UNKNOWN",
 				Message: "Your content range doesn't match what we have",
 			}
 		}
-		l := bytes.NewBuffer(b.uploads[target])
-		io.Copy(l, req.Body)
-		b.uploads[target] = l.Bytes()
+		var buf bytes.Buffer
+		io.Copy(&buf, req.Body)
+		if err := b.storage.AppendUpload(target, buf.Bytes()); err != nil {
+			return &regError{
+				Status:  http.StatusInternalServerError,
+				Code:    "INTERNAL_ERROR",
+				Message: err.Error(),
+			}
+		}
 		resp.Header().Set("Location", "/"+path.Join("v2", path.Join(elem[1:len(elem)-3]...), "blobs/uploads", target))
-		resp.Header().Set("Range", fmt.Sprintf("0-%d", len(l.Bytes())-1))
+		resp.Header().Set("Range", fmt.Sprintf("0-%d", len(buf.Bytes())-1))
 		resp.WriteHeader(http.StatusNoContent)
 		return nil
 	}
@@ -168,7 +185,7 @@ func (b *blobs) handle(resp http.ResponseWriter, req *http.Request) *regError {
 	if req.Method == "PATCH" && service == "uploads" && contentRange == "" {
 		b.lock.Lock()
 		defer b.lock.Unlock()
-		if _, ok := b.uploads[target]; ok {
+		if sz, err := b.storage.UploadSize(target); err == nil && sz > 0 {
 			return &regError{
 				Status:  http.StatusBadRequest,
 				Code:    "BLOB_UPLOAD_INVALID",
@@ -176,12 +193,18 @@ func (b *blobs) handle(resp http.ResponseWriter, req *http.Request) *regError {
 			}
 		}
 
-		l := &bytes.Buffer{}
-		io.Copy(l, req.Body)
+		var buf bytes.Buffer
+		io.Copy(&buf, req.Body)
+		if err := b.storage.AppendUpload(target, buf.Bytes()); err != nil {
+			return &regError{
+				Status:  http.StatusInternalServerError,
+				Code:    "INTERNAL_ERROR",
+				Message: err.Error(),
+			}
+		}
 
-		b.uploads[target] = l.Bytes()
 		resp.Header().Set("Location", "/"+path.Join("v2", path.Join(elem[1:len(elem)-3]...), "blobs/uploads", target))
-		resp.Header().Set("Range", fmt.Sprintf("0-%d", len(l.Bytes())-1))
+		resp.Header().Set("Range", fmt.Sprintf("0-%d", len(buf.Bytes())-1))
 		resp.WriteHeader(http.StatusNoContent)
 		return nil
 	}
@@ -197,9 +220,17 @@ func (b *blobs) handle(resp http.ResponseWriter, req *http.Request) *regError {
 	if req.Method == "PUT" && service == "uploads" && digest != "" {
 		b.lock.Lock()
 		defer b.lock.Unlock()
-		l := bytes.NewBuffer(b.uploads[target])
-		io.Copy(l, req.Body)
-		rd := sha256.Sum256(l.Bytes())
+
+		var buf bytes.Buffer
+		io.Copy(&buf, req.Body)
+		if err := b.storage.AppendUpload(target, buf.Bytes()); err != nil {
+			return &regError{
+				Status:  http.StatusInternalServerError,
+				Code:    "INTERNAL_ERROR",
+				Message: err.Error(),
+			}
+		}
+		rd := sha256.Sum256(buf.Bytes())
 		d := "sha256:" + hex.EncodeToString(rd[:])
 		if d != digest {
 			return &regError{
@@ -209,8 +240,20 @@ func (b *blobs) handle(resp http.ResponseWriter, req *http.Request) *regError {
 			}
 		}
 
-		b.contents[d] = l.Bytes()
-		delete(b.uploads, target)
+		if err := b.storage.PutBlob(d, buf.Bytes()); err != nil {
+			return &regError{
+				Status:  http.StatusInternalServerError,
+				Code:    "INTERNAL_ERROR",
+				Message: err.Error(),
+			}
+		}
+		if err := b.storage.DeleteUpload(target); err != nil {
+			return &regError{
+				Status:  http.StatusInternalServerError,
+				Code:    "INTERNAL_ERROR",
+				Message: err.Error(),
+			}
+		}
 		resp.Header().Set("Docker-Content-Digest", d)
 		resp.WriteHeader(http.StatusCreated)
 		return nil

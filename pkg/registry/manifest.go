@@ -23,7 +23,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,16 +40,16 @@ type listTags struct {
 	Tags []string `json:"tags"`
 }
 
+// TODO: export
 type manifest struct {
 	contentType string
 	blob        []byte
 }
 
 type manifests struct {
-	// maps repo -> manifest tag/digest -> manifest
-	manifests map[string]map[string]manifest
-	lock      sync.Mutex
-	log       *log.Logger
+	storage Storage
+	lock    sync.Mutex
+	log     *log.Logger
 }
 
 func isManifest(req *http.Request) bool {
@@ -93,16 +92,8 @@ func (m *manifests) handle(resp http.ResponseWriter, req *http.Request) *regErro
 		m.lock.Lock()
 		defer m.lock.Unlock()
 
-		c, ok := m.manifests[repo]
-		if !ok {
-			return &regError{
-				Status:  http.StatusNotFound,
-				Code:    "NAME_UNKNOWN",
-				Message: "Unknown name",
-			}
-		}
-		m, ok := c[target]
-		if !ok {
+		m, err := m.storage.GetManifest(repo, target)
+		if err != nil {
 			return &regError{
 				Status:  http.StatusNotFound,
 				Code:    "MANIFEST_UNKNOWN",
@@ -122,15 +113,8 @@ func (m *manifests) handle(resp http.ResponseWriter, req *http.Request) *regErro
 	if req.Method == "HEAD" {
 		m.lock.Lock()
 		defer m.lock.Unlock()
-		if _, ok := m.manifests[repo]; !ok {
-			return &regError{
-				Status:  http.StatusNotFound,
-				Code:    "NAME_UNKNOWN",
-				Message: "Unknown name",
-			}
-		}
-		m, ok := m.manifests[repo][target]
-		if !ok {
+		m, err := m.storage.GetManifest(repo, target)
+		if err != nil {
 			return &regError{
 				Status:  http.StatusNotFound,
 				Code:    "MANIFEST_UNKNOWN",
@@ -149,9 +133,6 @@ func (m *manifests) handle(resp http.ResponseWriter, req *http.Request) *regErro
 	if req.Method == "PUT" {
 		m.lock.Lock()
 		defer m.lock.Unlock()
-		if _, ok := m.manifests[repo]; !ok {
-			m.manifests[repo] = map[string]manifest{}
-		}
 		b := &bytes.Buffer{}
 		io.Copy(b, req.Body)
 		rd := sha256.Sum256(b.Bytes())
@@ -179,7 +160,7 @@ func (m *manifests) handle(resp http.ResponseWriter, req *http.Request) *regErro
 					continue
 				}
 				if desc.MediaType.IsIndex() || desc.MediaType.IsImage() {
-					if _, found := m.manifests[repo][desc.Digest.String()]; !found {
+					if _, err := m.storage.GetManifest(repo, desc.Digest.String()); err != nil {
 						return &regError{
 							Status:  http.StatusNotFound,
 							Code:    "MANIFEST_UNKNOWN",
@@ -195,8 +176,20 @@ func (m *manifests) handle(resp http.ResponseWriter, req *http.Request) *regErro
 
 		// Allow future references by target (tag) and immutable digest.
 		// See https://docs.docker.com/engine/reference/commandline/pull/#pull-an-image-by-digest-immutable-identifier.
-		m.manifests[repo][target] = mf
-		m.manifests[repo][digest] = mf
+		if err := m.storage.PutManifest(repo, target, mf); err != nil {
+			return &regError{
+				Status:  http.StatusInternalServerError,
+				Code:    "INTERNAL_ERROR",
+				Message: err.Error(),
+			}
+		}
+		if err := m.storage.PutManifest(repo, digest, mf); err != nil {
+			return &regError{
+				Status:  http.StatusInternalServerError,
+				Code:    "INTERNAL_ERROR",
+				Message: err.Error(),
+			}
+		}
 		resp.Header().Set("Docker-Content-Digest", digest)
 		resp.WriteHeader(http.StatusCreated)
 		return nil
@@ -205,24 +198,13 @@ func (m *manifests) handle(resp http.ResponseWriter, req *http.Request) *regErro
 	if req.Method == "DELETE" {
 		m.lock.Lock()
 		defer m.lock.Unlock()
-		if _, ok := m.manifests[repo]; !ok {
-			return &regError{
-				Status:  http.StatusNotFound,
-				Code:    "NAME_UNKNOWN",
-				Message: "Unknown name",
-			}
-		}
-
-		_, ok := m.manifests[repo][target]
-		if !ok {
+		if err := m.storage.DeleteManifest(repo, target); err != nil {
 			return &regError{
 				Status:  http.StatusNotFound,
 				Code:    "MANIFEST_UNKNOWN",
 				Message: "Unknown manifest",
 			}
 		}
-
-		delete(m.manifests[repo], target)
 		resp.WriteHeader(http.StatusAccepted)
 		return nil
 	}
@@ -249,28 +231,14 @@ func (m *manifests) handleTags(resp http.ResponseWriter, req *http.Request) *reg
 		m.lock.Lock()
 		defer m.lock.Unlock()
 
-		c, ok := m.manifests[repo]
-		if !ok {
+		tags, err := m.storage.ListTags(repo, n)
+		if err != nil {
 			return &regError{
 				Status:  http.StatusNotFound,
 				Code:    "NAME_UNKNOWN",
 				Message: "Unknown name",
 			}
 		}
-
-		var tags []string
-		countTags := 0
-		// TODO: implement pagination https://github.com/opencontainers/distribution-spec/blob/b505e9cc53ec499edbd9c1be32298388921bb705/detail.md#tags-paginated
-		for tag := range c {
-			if countTags >= n {
-				break
-			}
-			countTags++
-			if !strings.Contains(tag, "sha256:") {
-				tags = append(tags, tag)
-			}
-		}
-		sort.Strings(tags)
 
 		tagsToList := listTags{
 			Name: repo,
@@ -303,18 +271,14 @@ func (m *manifests) handleCatalog(resp http.ResponseWriter, req *http.Request) *
 		m.lock.Lock()
 		defer m.lock.Unlock()
 
-		var repos []string
-		countRepos := 0
-		// TODO: implement pagination
-		for key := range m.manifests {
-			if countRepos >= n {
-				break
+		repos, err := m.storage.Catalog(n)
+		if err != nil {
+			return &regError{
+				Status:  http.StatusInternalServerError,
+				Code:    "INTERNAL_ERROR",
+				Message: err.Error(),
 			}
-			countRepos++
-
-			repos = append(repos, key)
 		}
-
 		repositoriesToList := catalog{
 			Repos: repos,
 		}
