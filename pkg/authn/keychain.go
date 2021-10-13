@@ -16,10 +16,12 @@ package authn
 
 import (
 	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/docker/cli/cli/config"
 	"github.com/docker/cli/cli/config/types"
+	"github.com/docker/docker/pkg/homedir"
 	"github.com/google/go-containerregistry/pkg/name"
 )
 
@@ -63,6 +65,11 @@ func (dk *defaultKeychain) Resolve(target Resource) (Authenticator, error) {
 	dk.mu.Lock()
 	defer dk.mu.Unlock()
 	cf, err := config.Load(os.Getenv("DOCKER_CONFIG"))
+	if os.IsNotExist(err) {
+		// Some users (Podman users specifically) may have auth
+		// configured auth at this location.
+		cf, err = config.Load(filepath.Join(homedir.Get(), "config", "containers", "auth.json"))
+	}
 	if err != nil {
 		return nil, err
 	}
