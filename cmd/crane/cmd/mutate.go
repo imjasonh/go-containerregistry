@@ -30,6 +30,7 @@ func NewCmdMutate(options *[]crane.Option) *cobra.Command {
 	var labels map[string]string
 	var annotations map[string]string
 	var entrypoint, cmd []string
+	var newLayers []string
 
 	var newRef string
 
@@ -97,6 +98,15 @@ func NewCmdMutate(options *[]crane.Option) *cobra.Command {
 
 			img = mutate.Annotations(img, annotations).(v1.Image)
 
+			// Append layers.
+			// TODO: Set base image annotations if requested.
+			if len(newLayers) > 0 {
+				img, err = crane.Append(img, newLayers...)
+				if err != nil {
+					return fmt.Errorf("appending %v: %w", newLayers, err)
+				}
+			}
+
 			// If the new ref isn't provided, write over the original image.
 			// If that ref was provided by digest (e.g., output from
 			// another crane command), then strip that and push the
@@ -126,6 +136,8 @@ func NewCmdMutate(options *[]crane.Option) *cobra.Command {
 	mutateCmd.Flags().StringToStringVarP(&labels, "label", "l", nil, "New labels to add")
 	mutateCmd.Flags().StringSliceVar(&entrypoint, "entrypoint", nil, "New entrypoint to set")
 	mutateCmd.Flags().StringSliceVar(&cmd, "cmd", nil, "New cmd to set")
+	mutateCmd.Flags().StringSliceVar(&newLayers, "append", nil, "Layers to append")
+
 	mutateCmd.Flags().StringVarP(&newRef, "tag", "t", "", "New tag to apply to mutated image. If not provided, push by digest to the original image repository.")
 	return mutateCmd
 }
