@@ -95,6 +95,9 @@ func NewTag(name string, opts ...Option) (Tag, error) {
 	if tag == "" {
 		tag = opt.defaultTag
 	}
+	if !opt.strict {
+		tag = strings.ToLower(tag)
+	}
 
 	repo, err := NewRepository(base, opts...)
 	if err != nil {

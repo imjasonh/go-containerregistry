@@ -26,6 +26,7 @@ var goodStrictValidationRegistryNames = []string{
 	"example.text",
 	"localhost",
 	"localhost:9090",
+	"eXaMpLe.TeXt",
 }
 
 var goodWeakValidationRegistryNames = []string{
