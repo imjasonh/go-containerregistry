@@ -90,6 +90,7 @@ func (l layoutHandler) GetManifestByTag(ctx context.Context, repo, tag string) (
 	return nil, errNotFound // TODO
 }
 func (l layoutHandler) PutManifest(ctx context.Context, repo, digest string, mf manifest) error {
+	l.lp.WriteFile("TODO", mf.blob, 
 	return errNotFound // TODO
 }
 func (l layoutHandler) TagManifest(ctx context.Context, repo, digest, tag string) error {
