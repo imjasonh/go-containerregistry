@@ -77,3 +77,15 @@ var regErrDigestInvalid = &regError{
 	Code:    "NAME_INVALID",
 	Message: "invalid digest",
 }
+
+var regErrManifestUnknown = &regError{
+	Status:  http.StatusNotFound,
+	Code:    "MANIFEST_BLOB_UNKNOWN",
+	Message: "Unknown manifest",
+}
+
+var regErrUnknownName = &regError{
+	Status:  http.StatusNotFound,
+	Code:    "NAME_UNKNOWN",
+	Message: "Unknown name",
+}

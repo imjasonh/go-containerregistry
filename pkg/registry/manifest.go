@@ -16,6 +16,7 @@ package registry
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -26,7 +27,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/types"
@@ -47,10 +47,9 @@ type manifest struct {
 }
 
 type manifests struct {
-	// maps repo -> manifest tag/digest -> manifest
-	manifests map[string]map[string]manifest
-	lock      sync.Mutex
-	log       *log.Logger
+	manifestHandler manifestHandler
+
+	log *log.Logger
 }
 
 func isManifest(req *http.Request) bool {
@@ -81,9 +80,165 @@ func isCatalog(req *http.Request) bool {
 	return elems[len(elems)-1] == "_catalog"
 }
 
+// manifestHandler represents a minimal manifest storage backend, capable of
+// serving manifests by digest.
+type manifestHandler interface {
+	GetManifestByDigest(ctx context.Context, repo, digest string) (*manifest, error)
+}
+
+// manifestTagGetHandler is an extension interface representing a manifest
+// storage backend that can serve manifests by tag.
+type manifestTagGetHandler interface {
+	GetManifestByTag(ctx context.Context, repo, tag string) (*manifest, error)
+}
+
+// manifestPutHandler is an extension interface representing a manifest storage
+// backend that can write manifests by digest.
+type manifestPutHandler interface {
+	PutManifest(ctx context.Context, repo, digest string, mf manifest) error
+}
+
+// manifestTagHandler is an extension interface representing a manifest storage
+// backend that can tag manifests stored by digest.
+type manifestTagHandler interface {
+	TagManifest(ctx context.Context, repo, digest, tag string) error
+}
+
+// manifestDeleteHandler is an extension interface representing a manifest
+// storage backend that can delete manifests by digest.
+type manifestDeleteHandler interface {
+	DeleteManifest(ctx context.Context, repo, digest string) error
+}
+
+// manifestDeleteTagHandler is an extension interface representing a manifest
+// storage backend that can delete manifests by tag.
+type manifestDeleteTagHandler interface {
+	DeleteManifestByTag(ctx context.Context, repo, tag string) error
+}
+
+// manifestTagListHandler is an extension interface representing a manifest
+// storage backend that can list tags for a repository.
+type manifestTagListHandler interface {
+	ListTags(ctx context.Context, repo string, limit int) ([]string, error)
+}
+
+// catalogHandler is an extension interface representing a manifest storage
+// backend that can list repositories.
+type catalogHandler interface {
+	Catalog(ctx context.Context, limit int) ([]string, error)
+}
+
+func (m *memHandler) GetManifestByDigest(ctx context.Context, repo, digest string) (*manifest, error) {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
+	if m.manifests == nil {
+		return nil, errNotFound
+	}
+	if m.manifests[repo] == nil {
+		return nil, errNotFound
+	}
+	mf, ok := m.manifests[repo][digest]
+	if !ok {
+		return nil, errNotFound
+	}
+	return &mf, nil
+}
+func (m *memHandler) GetManifestByTag(ctx context.Context, repo, tag string) (*manifest, error) {
+	return m.GetManifestByDigest(ctx, repo, tag)
+}
+func (m *memHandler) PutManifest(ctx context.Context, repo, digest string, mf manifest) error {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
+	if m.manifests == nil {
+		return errNotFound
+	}
+	if m.manifests[repo] == nil {
+		m.manifests[repo] = map[string]manifest{}
+	}
+	m.manifests[repo][digest] = mf
+	return nil
+}
+func (m *memHandler) TagManifest(ctx context.Context, repo, digest, tag string) error {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
+	if m.manifests == nil {
+		return errNotFound
+	}
+	if m.manifests[repo] == nil {
+		return errNotFound
+	}
+	mf, ok := m.manifests[repo][digest]
+	if !ok {
+		return errNotFound
+	}
+	m.manifests[repo][tag] = mf
+	return nil
+}
+func (m *memHandler) DeleteManifest(ctx context.Context, repo, digest string) error {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
+	if m.manifests == nil {
+		return errNotFound
+	}
+	if m.manifests[repo] == nil {
+		return errNotFound
+	}
+	if _, ok := m.manifests[repo][digest]; !ok {
+		return errNotFound
+	}
+	delete(m.manifests[repo], digest)
+	return nil
+}
+func (m *memHandler) DeleteManifestByTag(ctx context.Context, repo, tag string) error {
+	return m.DeleteManifest(ctx, repo, tag)
+}
+func (m *memHandler) ListTags(ctx context.Context, repo string, n int) ([]string, error) {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
+	var tags []string
+	c, ok := m.manifests[repo]
+	if !ok {
+		return nil, errNotFound
+	}
+	count := 0
+	for tag := range c {
+		if count >= n {
+			break
+		}
+		count++
+		if !strings.Contains(tag, "sha256:") {
+			tags = append(tags, tag)
+		}
+	}
+	sort.Strings(tags)
+	return tags, nil
+}
+func (m *memHandler) Catalog(_ context.Context, n int) ([]string, error) {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
+	var repos []string
+	count := 0
+	for key := range m.manifests {
+		if count >= n {
+			break
+		}
+		count++
+		repos = append(repos, key)
+	}
+	sort.Strings(repos)
+	return repos, nil
+}
+
 // https://github.com/opencontainers/distribution-spec/blob/master/spec.md#pulling-an-image-manifest
 // https://github.com/opencontainers/distribution-spec/blob/master/spec.md#pushing-an-image
 func (m *manifests) handle(resp http.ResponseWriter, req *http.Request) *regError {
+	ctx := req.Context()
 	elem := strings.Split(req.URL.Path, "/")
 	elem = elem[1:]
 	target := elem[len(elem)-1]
@@ -91,66 +246,58 @@ func (m *manifests) handle(resp http.ResponseWriter, req *http.Request) *regErro
 
 	switch req.Method {
 	case http.MethodGet:
-		m.lock.Lock()
-		defer m.lock.Unlock()
-
-		c, ok := m.manifests[repo]
-		if !ok {
-			return &regError{
-				Status:  http.StatusNotFound,
-				Code:    "NAME_UNKNOWN",
-				Message: "Unknown name",
+		var mf *manifest
+		var err error
+		if strings.HasPrefix(target, "sha256:") {
+			mf, err = m.manifestHandler.GetManifestByDigest(ctx, repo, target)
+		} else {
+			mth, ok := m.manifestHandler.(manifestTagGetHandler)
+			if !ok {
+				return regErrUnsupported
 			}
+			mf, err = mth.GetManifestByTag(ctx, repo, target)
 		}
-		m, ok := c[target]
-		if !ok {
-			return &regError{
-				Status:  http.StatusNotFound,
-				Code:    "MANIFEST_UNKNOWN",
-				Message: "Unknown manifest",
-			}
+		if err == errNotFound {
+			return regErrManifestUnknown
 		}
-		rd := sha256.Sum256(m.blob)
+		rd := sha256.Sum256(mf.blob)
 		d := "sha256:" + hex.EncodeToString(rd[:])
 		resp.Header().Set("Docker-Content-Digest", d)
-		resp.Header().Set("Content-Type", m.contentType)
-		resp.Header().Set("Content-Length", fmt.Sprint(len(m.blob)))
+		resp.Header().Set("Content-Type", mf.contentType)
+		resp.Header().Set("Content-Length", fmt.Sprint(len(mf.blob)))
 		resp.WriteHeader(http.StatusOK)
-		io.Copy(resp, bytes.NewReader(m.blob))
+		io.Copy(resp, bytes.NewReader(mf.blob))
 		return nil
 
 	case http.MethodHead:
-		m.lock.Lock()
-		defer m.lock.Unlock()
-		if _, ok := m.manifests[repo]; !ok {
-			return &regError{
-				Status:  http.StatusNotFound,
-				Code:    "NAME_UNKNOWN",
-				Message: "Unknown name",
+		var mf *manifest
+		var err error
+		if strings.HasPrefix(target, "sha256:") {
+			mf, err = m.manifestHandler.GetManifestByDigest(ctx, repo, target)
+		} else {
+			mth, ok := m.manifestHandler.(manifestTagGetHandler)
+			if !ok {
+				return regErrUnsupported
 			}
+			mf, err = mth.GetManifestByTag(ctx, repo, target)
 		}
-		m, ok := m.manifests[repo][target]
-		if !ok {
-			return &regError{
-				Status:  http.StatusNotFound,
-				Code:    "MANIFEST_UNKNOWN",
-				Message: "Unknown manifest",
-			}
+		if err == errNotFound {
+			return regErrManifestUnknown
 		}
-		rd := sha256.Sum256(m.blob)
+		rd := sha256.Sum256(mf.blob)
 		d := "sha256:" + hex.EncodeToString(rd[:])
 		resp.Header().Set("Docker-Content-Digest", d)
-		resp.Header().Set("Content-Type", m.contentType)
-		resp.Header().Set("Content-Length", fmt.Sprint(len(m.blob)))
+		resp.Header().Set("Content-Type", mf.contentType)
+		resp.Header().Set("Content-Length", fmt.Sprint(len(mf.blob)))
 		resp.WriteHeader(http.StatusOK)
 		return nil
 
 	case http.MethodPut:
-		m.lock.Lock()
-		defer m.lock.Unlock()
-		if _, ok := m.manifests[repo]; !ok {
-			m.manifests[repo] = map[string]manifest{}
+		mph, ok := m.manifestHandler.(manifestPutHandler)
+		if !ok {
+			return regErrUnsupported
 		}
+
 		b := &bytes.Buffer{}
 		io.Copy(b, req.Body)
 		rd := sha256.Sum256(b.Bytes())
@@ -158,6 +305,11 @@ func (m *manifests) handle(resp http.ResponseWriter, req *http.Request) *regErro
 		mf := manifest{
 			blob:        b.Bytes(),
 			contentType: req.Header.Get("Content-Type"),
+		}
+		if err := mph.PutManifest(ctx, repo, digest, mf); err == errNotFound {
+			return regErrManifestUnknown
+		} else if err != nil {
+			return regErrInternal(err)
 		}
 
 		// If the manifest is a manifest list, check that the manifest
@@ -178,12 +330,14 @@ func (m *manifests) handle(resp http.ResponseWriter, req *http.Request) *regErro
 					continue
 				}
 				if desc.MediaType.IsIndex() || desc.MediaType.IsImage() {
-					if _, found := m.manifests[repo][desc.Digest.String()]; !found {
+					if _, err := m.manifestHandler.GetManifestByDigest(ctx, repo, desc.Digest.String()); err == errNotFound {
 						return &regError{
 							Status:  http.StatusNotFound,
 							Code:    "MANIFEST_UNKNOWN",
 							Message: fmt.Sprintf("Sub-manifest %q not found", desc.Digest),
 						}
+					} else if err != nil {
+						return regErrInternal(err)
 					}
 				} else {
 					// TODO: Probably want to do an existence check for blobs.
@@ -192,35 +346,30 @@ func (m *manifests) handle(resp http.ResponseWriter, req *http.Request) *regErro
 			}
 		}
 
-		// Allow future references by target (tag) and immutable digest.
+		// Allow future references by target (tag).
 		// See https://docs.docker.com/engine/reference/commandline/pull/#pull-an-image-by-digest-immutable-identifier.
-		m.manifests[repo][target] = mf
-		m.manifests[repo][digest] = mf
+		if mth, ok := m.manifestHandler.(manifestTagHandler); ok {
+			if err := mth.TagManifest(ctx, repo, digest, target); err == errNotFound {
+				return regErrManifestUnknown
+			} else if err != nil {
+				return regErrInternal(err)
+			}
+		}
+
 		resp.Header().Set("Docker-Content-Digest", digest)
 		resp.WriteHeader(http.StatusCreated)
 		return nil
 
 	case http.MethodDelete:
-		m.lock.Lock()
-		defer m.lock.Unlock()
-		if _, ok := m.manifests[repo]; !ok {
-			return &regError{
-				Status:  http.StatusNotFound,
-				Code:    "NAME_UNKNOWN",
-				Message: "Unknown name",
-			}
-		}
-
-		_, ok := m.manifests[repo][target]
+		mdh, ok := m.manifestHandler.(manifestDeleteHandler)
 		if !ok {
-			return &regError{
-				Status:  http.StatusNotFound,
-				Code:    "MANIFEST_UNKNOWN",
-				Message: "Unknown manifest",
-			}
+			return regErrUnsupported
 		}
-
-		delete(m.manifests[repo], target)
+		if err := mdh.DeleteManifest(ctx, repo, target); err == errNotFound {
+			return regErrManifestUnknown
+		} else if err != nil {
+			return regErrInternal(err)
+		}
 		resp.WriteHeader(http.StatusAccepted)
 		return nil
 
@@ -234,6 +383,7 @@ func (m *manifests) handle(resp http.ResponseWriter, req *http.Request) *regErro
 }
 
 func (m *manifests) handleTags(resp http.ResponseWriter, req *http.Request) *regError {
+	ctx := req.Context()
 	elem := strings.Split(req.URL.Path, "/")
 	elem = elem[1:]
 	repo := strings.Join(elem[1:len(elem)-2], "/")
@@ -245,31 +395,17 @@ func (m *manifests) handleTags(resp http.ResponseWriter, req *http.Request) *reg
 	}
 
 	if req.Method == "GET" {
-		m.lock.Lock()
-		defer m.lock.Unlock()
-
-		c, ok := m.manifests[repo]
+		mlh, ok := m.manifestHandler.(manifestTagListHandler)
 		if !ok {
-			return &regError{
-				Status:  http.StatusNotFound,
-				Code:    "NAME_UNKNOWN",
-				Message: "Unknown name",
-			}
+			return regErrUnsupported
 		}
-
-		var tags []string
-		countTags := 0
 		// TODO: implement pagination https://github.com/opencontainers/distribution-spec/blob/b505e9cc53ec499edbd9c1be32298388921bb705/detail.md#tags-paginated
-		for tag := range c {
-			if countTags >= n {
-				break
-			}
-			countTags++
-			if !strings.Contains(tag, "sha256:") {
-				tags = append(tags, tag)
-			}
+		tags, err := mlh.ListTags(ctx, repo, n)
+		if err == errNotFound {
+			return regErrUnknownName
+		} else if err != nil {
+			return regErrInternal(err)
 		}
-		sort.Strings(tags)
 
 		tagsToList := listTags{
 			Name: repo,
@@ -291,6 +427,7 @@ func (m *manifests) handleTags(resp http.ResponseWriter, req *http.Request) *reg
 }
 
 func (m *manifests) handleCatalog(resp http.ResponseWriter, req *http.Request) *regError {
+	ctx := req.Context()
 	query := req.URL.Query()
 	nStr := query.Get("n")
 	n := 10000
@@ -299,21 +436,16 @@ func (m *manifests) handleCatalog(resp http.ResponseWriter, req *http.Request) *
 	}
 
 	if req.Method == "GET" {
-		m.lock.Lock()
-		defer m.lock.Unlock()
-
-		var repos []string
-		countRepos := 0
-		// TODO: implement pagination
-		for key := range m.manifests {
-			if countRepos >= n {
-				break
-			}
-			countRepos++
-
-			repos = append(repos, key)
+		ch, ok := m.manifestHandler.(catalogHandler)
+		if !ok {
+			return regErrUnsupported
 		}
 
+		// TODO: implement pagination
+		repos, err := ch.Catalog(ctx, n)
+		if err != nil {
+			return regErrInternal(err)
+		}
 		repositoriesToList := catalog{
 			Repos: repos,
 		}

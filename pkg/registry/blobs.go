@@ -123,6 +123,7 @@ var errNotFound = errors.New("not found")
 
 type memHandler struct {
 	blobs, uploads map[string][]byte
+	manifests      map[string]map[string]manifest
 	lock           sync.Mutex
 }
 
