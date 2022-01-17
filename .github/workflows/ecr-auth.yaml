@@ -1,8 +1,8 @@
 name: ECR Authentication test
 
 on:
-  pull_request_target:
-    branches: [ 'main' ]
+  push:
+    branches: ['ecr-test']
 
 permissions:
   # This let's us clone the repo
@@ -40,6 +40,8 @@ jobs:
         run: |
           # List the tags
           krane ls ${{ env.AWS_ACCOUNT }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/go-containerregistry-test
+
+          krane digest ubuntu
 
   crane-ecr-login:
     runs-on: ubuntu-latest
@@ -83,3 +85,4 @@ jobs:
         run: |
           # List the tags
           crane ls ${{ env.AWS_ACCOUNT }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/go-containerregistry-test
+          crane digest ubuntu
