@@ -30,17 +30,8 @@ jobs:
         working-directory: ./cmd/krane
         run: go install .
 
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v1.6.0
-        with:
-          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT }}:role/federated-ecr-readonly
-          aws-region: ${{ env.AWS_REGION }}
-
       - name: Test krane + ECR
         run: |
-          # List the tags
-          krane ls ${{ env.AWS_ACCOUNT }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/go-containerregistry-test
-
           krane digest ubuntu
 
   crane-ecr-login:
@@ -62,14 +53,8 @@ jobs:
         working-directory: ./cmd/crane
         run: go install .
 
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v1.6.0
-        with:
-          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT }}:role/federated-ecr-readonly
-          aws-region: ${{ env.AWS_REGION }}
-
       - run: |
-          wget https://amazon-ecr-credential-helper-releases.s3.us-east-2.amazonaws.com/0.5.0/linux-amd64/docker-credential-ecr-login
+          wget https://amazon-ecr-credential-helper-releases.s3.us-east-2.amazonaws.com/0.6.0/linux-amd64/docker-credential-ecr-login
           chmod +x ./docker-credential-ecr-login
           mv docker-credential-ecr-login /usr/local/bin
 
@@ -83,6 +68,4 @@ jobs:
 
       - name: Test crane + ECR
         run: |
-          # List the tags
-          crane ls ${{ env.AWS_ACCOUNT }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/go-containerregistry-test
           crane digest ubuntu
