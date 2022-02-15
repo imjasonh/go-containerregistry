@@ -11,7 +11,7 @@ require (
 	github.com/awslabs/amazon-ecr-credential-helper/ecr-login v0.0.0-20211215200129-69c85dc22db6
 	github.com/chrismellard/docker-credential-acr-env v0.0.0-20220119192733-fe33c00cee21
 	github.com/google/go-containerregistry v0.8.1-0.20220110151055-a61fd0a8e2bb
-	github.com/google/go-containerregistry/pkg/authn/kubernetes v0.0.0-20220214202839-625fe7b4276a
+	github.com/google/go-containerregistry/pkg/authn/kubernetes v0.0.0-20220215143938-97826ab9fed2
 	k8s.io/api v0.23.3
 	k8s.io/client-go v0.23.3
 )
