@@ -4,6 +4,8 @@ on:
   schedule:
   - cron: '0 6 * * 2' # weekly at 6AM Tuesday
   workflow_dispatch:
+  push:
+    branches: ['bump-deps-action']
 
 permissions:
   contents: write
@@ -14,7 +16,7 @@ jobs:
     name: Bump Deps
 
     # Don't bother bumping deps on forks.
-    if: ${{ github.repository == "google/go-containerregistry" }}
+    if: ${{ github.repository == "imjasonh/go-containerregistry" }}
     runs-on: ubuntu-latest
 
     steps:
