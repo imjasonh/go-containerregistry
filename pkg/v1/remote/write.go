@@ -22,6 +22,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 
@@ -30,6 +32,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/logs"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/partial"
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 	"github.com/google/go-containerregistry/pkg/v1/stream"
@@ -63,6 +66,17 @@ func Write(ref name.Reference, img v1.Image, options ...Option) (rerr error) {
 }
 
 func writeImage(ctx context.Context, ref name.Reference, img v1.Image, o *options, lastUpdate *v1.Update) error {
+	if env := os.Getenv("GGCR_EXPERIMENT_DATA_THRESHOLD"); env != "" {
+		threshold, _ := strconv.ParseInt(env, 10, 64)
+		if threshold > 0 {
+			var err error
+			img, err = mutate.InlineData(img, threshold)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
 	ls, err := img.Layers()
 	if err != nil {
 		return err

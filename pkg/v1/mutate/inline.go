@@ -58,9 +58,15 @@ func InlineData(img v1.Image, threshold int64) (v1.Image, error) {
 		mf.Config = desc
 	}
 
+	configFile, err := img.ConfigFile()
+	if err != nil {
+		return nil, err
+	}
+
 	return &image{
-		base:     img,
-		manifest: mf,
-		computed: true,
+		base:       img,
+		manifest:   mf,
+		configFile: configFile,
+		computed:   true,
 	}, nil
 }
