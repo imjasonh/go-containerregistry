@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os/exec"
 	"time"
 
@@ -62,14 +63,25 @@ func NewEnvAuthenticator() (authn.Authenticator, error) {
 
 // NewGcloudAuthenticator returns an oauth2.TokenSource that generates access
 // tokens by shelling out to the gcloud sdk.
-func NewGcloudAuthenticator() (authn.Authenticator, error) {
+func NewGcloudAuthenticator(opts ...GcloudAuthenticatorOptions) (authn.Authenticator, error) {
 	if _, err := exec.LookPath("gcloud"); err != nil {
 		// gcloud is not available, fall back to anonymous
 		logs.Warn.Println("gcloud binary not found")
 		return authn.Anonymous, nil
 	}
 
-	ts := gcloudSource{GetGcloudCmd}
+	ts := gcloudSource{
+		exec:      GetGcloudCmd,
+		logOutput: logs.Warn.Writer(),
+	}
+
+	// Iterate over GcloudAuthenticatorOptions, which are only variadic to
+	// prevent a breaking API change for existing callers.
+	for _, opt := range opts {
+		if opt.LogOutput != nil {
+			ts.logOutput = opt.LogOutput
+		}
+	}
 
 	// Attempt to fetch a token to ensure gcloud is installed and we can run it.
 	token, err := ts.Token()
@@ -78,6 +90,14 @@ func NewGcloudAuthenticator() (authn.Authenticator, error) {
 	}
 
 	return &tokenSourceAuth{oauth2.ReuseTokenSource(token, ts)}, nil
+}
+
+// GcloudAuthenticatorOptions provides options for interacting with
+// NewGcloudAuthenticator.
+type GcloudAuthenticatorOptions struct {
+	// LogOutput controls where gcloud stderr logs are redirected. By
+	// default these go to logs.Warn.
+	LogOutput io.Writer
 }
 
 // NewJSONKeyAuthenticator returns a Basic authenticator which uses Service Account
@@ -145,6 +165,8 @@ type gcloudOutput struct {
 type gcloudSource struct {
 	// This is passed in so that we mock out gcloud and test Token.
 	exec func() *exec.Cmd
+
+	logOutput io.Writer
 }
 
 // Token implements oauath2.TokenSource.
@@ -153,8 +175,9 @@ func (gs gcloudSource) Token() (*oauth2.Token, error) {
 	var out bytes.Buffer
 	cmd.Stdout = &out
 
-	// Don't attempt to interpret stderr, just pass it through.
-	cmd.Stderr = logs.Warn.Writer()
+	// Don't attempt to interpret stderr, just pass it through to whatever
+	// log output was configured.
+	cmd.Stderr = gs.logOutput
 
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("error executing `gcloud config config-helper`: %w", err)

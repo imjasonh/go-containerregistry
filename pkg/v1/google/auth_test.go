@@ -78,6 +78,11 @@ func TestMain(m *testing.M) {
 		// Makes the token_expiry time parser fail.
 		fmt.Println(badexpiry)
 
+	case "logsomething":
+		// Exercises stderr log redirection.
+		fmt.Fprintln(os.Stderr, "i am logging to stderr")
+		fallthrough
+
 	case "success":
 		// Returns a seemingly valid token.
 		fmt.Println(success)
@@ -123,13 +128,12 @@ func TestGcloudErrors(t *testing.T) {
 }
 
 func TestGcloudSuccess(t *testing.T) {
-	// Stupid coverage to make sure it doesn't panic.
 	var b bytes.Buffer
 	logs.Debug.SetOutput(&b)
 
 	GetGcloudCmd = newGcloudCmdMock("success")
 
-	auth, err := NewGcloudAuthenticator()
+	auth, err := NewGcloudAuthenticator(GcloudAuthenticatorOptions{LogOutput: &b})
 	if err != nil {
 		t.Fatalf("NewGcloudAuthenticator got error %v", err)
 	}
@@ -141,6 +145,26 @@ func TestGcloudSuccess(t *testing.T) {
 
 	if got, want := token.Password, "mytoken"; got != want {
 		t.Errorf("wanted token %q, got %q", want, got)
+	}
+}
+
+func TestGcloudLogRedirection(t *testing.T) {
+	var b bytes.Buffer
+	logs.Debug.SetOutput(&b)
+
+	GetGcloudCmd = newGcloudCmdMock("logsomething")
+
+	auth, err := NewGcloudAuthenticator(GcloudAuthenticatorOptions{LogOutput: &b})
+	if err != nil {
+		t.Fatalf("NewGcloudAuthenticator got error %v", err)
+	}
+
+	if _, err := auth.Authorization(); err != nil {
+		t.Fatalf("Authorization got error %v", err)
+	}
+
+	if got, want := b.String(), "i am logging to stderr\n"; got != want {
+		t.Fatalf("Collected logs; got %q, want %q", got, want)
 	}
 }
 
