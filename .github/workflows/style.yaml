@@ -71,7 +71,7 @@ jobs:
 
           echo "${TEMP_PATH}" >> $GITHUB_PATH
 
-      - uses: golangci/golangci-lint-action@v2
+      - uses: golangci/golangci-lint-action@v3
         with:
           version: v1.42.1
 
