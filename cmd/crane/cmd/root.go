@@ -13,8 +13,10 @@
 package cmd
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -25,6 +27,10 @@ import (
 	"github.com/google/go-containerregistry/pkg/logs"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/spf13/cobra"
+	"go.opentelemetry.io/otel"
+	stdout "go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 const (
@@ -41,6 +47,7 @@ func New(use, short string, options []crane.Option) *cobra.Command {
 	insecure := false
 	ndlayers := false
 	platform := &platformValue{}
+	trace := false
 
 	root := &cobra.Command{
 		Use:               use,
@@ -48,8 +55,9 @@ func New(use, short string, options []crane.Option) *cobra.Command {
 		RunE:              func(cmd *cobra.Command, _ []string) error { return cmd.Usage() },
 		DisableAutoGenTag: true,
 		SilenceUsage:      true,
-		PersistentPreRun: func(cmd *cobra.Command, args []string) {
-			options = append(options, crane.WithContext(cmd.Context()))
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+
 			// TODO(jonjohnsonjr): crane.Verbose option?
 			if verbose {
 				logs.Debug.SetOutput(os.Stderr)
@@ -87,8 +95,31 @@ func New(use, short string, options []crane.Option) *cobra.Command {
 					httpHeaders: cf.HTTPHeaders,
 				}
 			}
-
 			options = append(options, crane.WithTransport(rt))
+
+			if trace {
+				tp, err := initTracer()
+				if err != nil {
+					return err
+				}
+				defer func() {
+					if err := tp.Shutdown(context.Background()); err != nil {
+						log.Printf("Error shutting down tracer provider: %v", err)
+					}
+				}()
+				tracer := otel.Tracer("crane")
+				otel.SetTextMapPropagator(propagation.TraceContext{})
+
+				tctx, span := tracer.Start(ctx, "crane "+cmd.Name())
+				defer span.End()
+
+				spanID := span.SpanContext().SpanID().String()
+
+				options = append(options, crane.WithContext(tctx), crane.WithTransport(&traceTransport{spanID, rt}))
+			} else {
+				options = append(options, crane.WithContext(ctx))
+			}
+			return nil
 		},
 	}
 
@@ -122,8 +153,35 @@ func New(use, short string, options []crane.Option) *cobra.Command {
 	root.PersistentFlags().BoolVar(&insecure, "insecure", false, "Allow image references to be fetched without TLS")
 	root.PersistentFlags().BoolVar(&ndlayers, "allow-nondistributable-artifacts", false, "Allow pushing non-distributable (foreign) layers")
 	root.PersistentFlags().Var(platform, "platform", "Specifies the platform in the form os/arch[/variant][:osversion] (e.g. linux/amd64).")
+	root.PersistentFlags().BoolVar(&trace, "trace", false, "Enable trace spans")
 
 	return root
+}
+
+// traceTransport sets trace headers on outgoing requests.
+type traceTransport struct {
+	spanID string
+	inner  http.RoundTripper
+}
+
+// RoundTrip implements http.RoundTripper.
+func (ht traceTransport) RoundTrip(in *http.Request) (*http.Response, error) {
+	in.Header.Set("X-Cloud-Trace-Context", ht.spanID)
+	return ht.inner.RoundTrip(in)
+}
+
+func initTracer() (*sdktrace.TracerProvider, error) {
+	exporter, err := stdout.New(stdout.WithPrettyPrint())
+	if err != nil {
+		return nil, err
+	}
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithBatcher(exporter),
+	)
+	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
+	return tp, err
 }
 
 // headerTransport sets headers on outgoing requests.
